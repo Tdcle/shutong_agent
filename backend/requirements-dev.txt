@@ -1,0 +1,31 @@
+# Core
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+sse-starlette>=2.2.0
+
+# Database (SQLite - zero config)
+sqlalchemy[asyncio]>=2.0.36
+aiosqlite>=0.20.0
+
+# Embedding (API-based, same endpoint as LLM - zero config)
+# Optional: for offline mode, install sentence-transformers>=3.0.0
+
+# Config
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# LLM / Agent
+langgraph>=0.2.60
+langchain>=0.3.15
+langchain-openai>=0.3.4
+langchain-community>=0.3.15
+openai>=1.70.0
+
+# HTTP & Search
+httpx>=0.28.0
+ddgs>=6.0.0
+aiofiles>=24.1.0
+python-multipart>=0.0.19
+
+# Dev
+watchfiles>=0.24.0
