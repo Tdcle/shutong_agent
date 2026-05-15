@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, nextTick, watch } from 'vue'
 import { useChat } from '../composables/useChat'
+import PermissionDialog from './PermissionDialog.vue'
 
 const props = defineProps<{
   sessionId: string
@@ -10,10 +11,10 @@ const emit = defineEmits<{
   sessionCreated: [id: string]
 }>()
 
-const { messages, isStreaming, loadMessages, sendMessage, cancelStreaming, clearMessages } = useChat()
+const { messages, isStreaming, pendingPermission, toolCalls, toolLabel, toolArgPreview, loadMessages, sendMessage, respondPermission, cancelStreaming, clearMessages } = useChat()
 const inputText = ref('')
-const agentType = ref<'react' | 'plan_execute' | 'reflection'>('react')
 const chatContainer = ref<HTMLElement | null>(null)
+const expandedTools = ref<Set<string>>(new Set())
 
 watch(() => props.sessionId, (newId) => {
   if (newId) {
@@ -28,9 +29,10 @@ async function handleSend() {
   if (!text || isStreaming.value) return
 
   inputText.value = ''
+  expandedTools.value = new Set()
 
   try {
-    const newSessionId = await sendMessage(props.sessionId, text, agentType.value)
+    const newSessionId = await sendMessage(props.sessionId, text)
     if (newSessionId && !props.sessionId) {
       emit('sessionCreated', newSessionId)
     }
@@ -42,11 +44,37 @@ async function handleSend() {
   scrollToBottom()
 }
 
+async function handlePermissionApprove(requestId: string, remember: boolean = false) {
+  pendingPermission.value = null
+  await respondPermission(requestId, true, remember)
+}
+
+async function handlePermissionDeny(requestId: string) {
+  pendingPermission.value = null
+  await respondPermission(requestId, false)
+}
+
+function toggleToolExpand(tcId: string) {
+  const next = new Set(expandedTools.value)
+  if (next.has(tcId)) {
+    next.delete(tcId)
+  } else {
+    next.add(tcId)
+  }
+  expandedTools.value = next
+}
+
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     handleSend()
   }
+}
+
+function autoResize(e: Event) {
+  const el = e.target as HTMLTextAreaElement
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, 150) + 'px'
 }
 
 function scrollToBottom() {
@@ -55,25 +83,36 @@ function scrollToBottom() {
   }
 }
 
+let codeBlockId = 0
+
 function formatContent(text: string): string {
-  // Basic markdown: code blocks and inline code
   return text
-    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
+    .replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) => {
+      const id = `code-block-${++codeBlockId}`
+      const langLabel = lang || 'code'
+      return `<div class="code-block" data-id="${id}"><div class="code-header"><span class="code-lang">${langLabel}</span><button class="code-copy-btn" data-copy-target="${id}">复制</button></div><pre><code id="${id}">${code}</code></pre></div>`
+    })
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\n/g, '<br>')
+}
+
+function handleContentClick(e: Event) {
+  const target = e.target as HTMLElement
+  if (target.classList.contains('code-copy-btn')) {
+    const id = target.getAttribute('data-copy-target')
+    if (!id) return
+    const codeEl = document.getElementById(id)
+    if (codeEl) {
+      navigator.clipboard.writeText(codeEl.textContent || '')
+      target.textContent = '已复制'
+      setTimeout(() => { target.textContent = '复制' }, 1500)
+    }
+  }
 }
 </script>
 
 <template>
   <div class="chat-area">
-    <div class="chat-header">
-      <select v-model="agentType" class="agent-select">
-        <option value="react">ReAct Agent</option>
-        <option value="plan_execute">Plan-Execute Agent</option>
-        <option value="reflection">Reflection Agent</option>
-      </select>
-    </div>
-
     <div ref="chatContainer" class="chat-messages">
       <div v-if="messages.length === 0" class="welcome">
         <h1>书童</h1>
@@ -81,19 +120,42 @@ function formatContent(text: string): string {
         <p class="welcome-hint">发送消息开始对话</p>
       </div>
 
-      <div
-        v-for="(msg, idx) in messages"
-        :key="idx"
-        class="message"
-        :class="msg.role"
-      >
-        <div class="message-role">{{ msg.role === 'user' ? '你' : 'Agent' }}</div>
+      <template v-for="(msg, idx) in messages" :key="'msg_' + idx">
+        <div class="message" :class="msg.role">
+          <div v-if="msg.role === 'assistant'" class="message-role">Agent</div>
+          <div
+            class="message-content"
+            v-html="formatContent(msg.content) || (msg.isStreaming ? '思考中...' : '')"
+            @click="handleContentClick"
+          ></div>
+          <div v-if="msg.isStreaming" class="typing-indicator">
+            <span></span><span></span><span></span>
+          </div>
+        </div>
+      </template>
+
+      <!-- Tool call steps — show inline during streaming -->
+      <div v-if="toolCalls.length > 0" class="tool-steps-section">
         <div
-          class="message-content"
-          v-html="formatContent(msg.content) || (msg.isStreaming ? '思考中...' : '')"
-        ></div>
-        <div v-if="msg.isStreaming" class="typing-indicator">
-          <span></span><span></span><span></span>
+          v-for="tc in toolCalls"
+          :key="tc.id"
+          class="tool-step"
+          :class="{ 'is-running': tc.status === 'running', 'is-done': tc.status === 'done', 'is-error': tc.status === 'done' && !tc.success }"
+          @click="toggleToolExpand(tc.id)"
+        >
+          <div class="tool-step-header">
+            <span class="tool-step-status">
+              <span v-if="tc.status === 'running'" class="spinner"></span>
+              <span v-else-if="tc.success">&#10003;</span>
+              <span v-else>&#10007;</span>
+            </span>
+            <span class="tool-step-name">{{ toolLabel(tc.tool) }}</span>
+            <span class="tool-step-arg">{{ toolArgPreview(tc.args) }}</span>
+            <span class="tool-step-expand">{{ expandedTools.has(tc.id) ? '▾' : '▸' }}</span>
+          </div>
+          <div v-if="expandedTools.has(tc.id) && tc.result" class="tool-step-body">
+            <pre>{{ tc.result }}</pre>
+          </div>
         </div>
       </div>
     </div>
@@ -106,7 +168,7 @@ function formatContent(text: string): string {
         rows="1"
         :disabled="isStreaming"
         @keydown="handleKeydown"
-        @input="() => { const el = $event.target as HTMLTextAreaElement; el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 150) + 'px' }"
+        @input="autoResize"
       ></textarea>
       <button
         v-if="!isStreaming"
@@ -124,6 +186,13 @@ function formatContent(text: string): string {
         停止
       </button>
     </div>
+
+    <PermissionDialog
+      v-if="pendingPermission"
+      :request="pendingPermission"
+      @approve="handlePermissionApprove"
+      @deny="handlePermissionDeny"
+    />
   </div>
 </template>
 
@@ -132,58 +201,47 @@ function formatContent(text: string): string {
   display: flex;
   flex-direction: column;
   height: 100%;
-  max-width: 900px;
+  max-width: 860px;
   margin: 0 auto;
   width: 100%;
-}
-
-.chat-header {
-  padding: 12px 16px;
-  border-bottom: 1px solid #0f3460;
-  display: flex;
-  align-items: center;
-}
-
-.agent-select {
-  background: #16213e;
-  color: #e0e0e0;
-  border: 1px solid #0f3460;
-  padding: 6px 12px;
-  border-radius: 6px;
-  font-size: 13px;
+  padding: 0 16px;
 }
 
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 24px 0;
 }
 
 .welcome {
   text-align: center;
-  padding: 60px 20px;
+  padding: 80px 20px;
 }
 
 .welcome h1 {
-  font-size: 32px;
-  color: #e94560;
-  margin-bottom: 8px;
+  font-size: 36px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--primary), #8b5cf6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 12px;
 }
 
 .welcome p {
-  color: #888;
+  color: var(--text-secondary);
   font-size: 16px;
 }
 
 .welcome-hint {
-  margin-top: 24px;
+  margin-top: 28px;
   font-size: 14px !important;
-  color: #666 !important;
+  color: var(--text-muted) !important;
 }
 
 .message {
-  margin-bottom: 16px;
-  max-width: 85%;
+  margin-bottom: 20px;
+  max-width: 80%;
 }
 
 .message.user {
@@ -195,56 +253,109 @@ function formatContent(text: string): string {
 }
 
 .message-role {
-  font-size: 12px;
-  color: #888;
-  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
 }
 
 .message-content {
-  padding: 10px 14px;
-  border-radius: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.7;
   word-break: break-word;
 }
 
 .message.user .message-content {
-  background: #0f3460;
-  color: #e0e0e0;
+  background: var(--bg-user-msg);
+  color: white;
+  border-radius: var(--radius) var(--radius) 4px var(--radius);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.2);
 }
 
 .message.assistant .message-content {
-  background: #16213e;
-  color: #e0e0e0;
-  border: 1px solid #0f3460;
+  background: var(--bg-assistant-msg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) var(--radius) 4px;
+  box-shadow: var(--shadow-sm);
+}
+
+.message-content :deep(.code-block) {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin: 10px 0;
+  overflow: hidden;
+}
+
+.message-content :deep(.code-header) {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  background: #f1f5f9;
+  border-bottom: 1px solid var(--border);
+}
+
+.message-content :deep(.code-lang) {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.message-content :deep(.code-copy-btn) {
+  font-size: 12px;
+  color: var(--primary);
+  background: none;
+  border: 1px solid var(--primary);
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.message-content :deep(.code-copy-btn:hover) {
+  background: var(--primary);
+  color: white;
 }
 
 .message-content :deep(pre) {
-  background: #0a0a1a;
-  padding: 12px;
-  border-radius: 8px;
+  background: #f8fafc;
+  color: #334155;
+  padding: 14px;
   overflow-x: auto;
-  margin: 8px 0;
+  margin: 0;
   font-size: 13px;
+  line-height: 1.5;
 }
 
 .message-content :deep(code) {
-  background: #0a0a1a;
+  background: #f1f5f9;
+  color: var(--primary);
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 13px;
 }
 
+.message-content :deep(pre code) {
+  background: none;
+  color: inherit;
+  padding: 0;
+}
+
 .typing-indicator {
   display: flex;
-  gap: 4px;
-  padding: 4px 14px;
+  gap: 5px;
+  padding: 6px 16px;
 }
 
 .typing-indicator span {
-  width: 6px;
-  height: 6px;
-  background: #888;
+  width: 7px;
+  height: 7px;
+  background: var(--primary);
   border-radius: 50%;
   animation: typing 1.4s infinite;
 }
@@ -257,64 +368,186 @@ function formatContent(text: string): string {
   30% { opacity: 1; transform: scale(1); }
 }
 
-.chat-input-area {
-  padding: 12px 16px;
-  border-top: 1px solid #0f3460;
+/* ---- Tool call steps ---- */
+.tool-steps-section {
+  margin-top: 4px;
+  margin-bottom: 16px;
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-step {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s;
+  max-width: 500px;
+}
+
+.tool-step:hover {
+  border-color: var(--primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.tool-step.is-running {
+  border-left: 3px solid var(--warning);
+}
+
+.tool-step.is-done {
+  border-left: 3px solid var(--success);
+}
+
+.tool-step.is-error {
+  border-left: 3px solid var(--danger);
+}
+
+.tool-step-header {
+  display: flex;
+  align-items: center;
   gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.tool-step-status {
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--success);
+}
+
+.tool-step.is-error .tool-step-status {
+  color: var(--danger);
+}
+
+.tool-step.is-running .tool-step-status {
+  color: var(--warning);
+}
+
+.spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--warning);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.tool-step-name {
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tool-step-arg {
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.tool-step-expand {
+  color: var(--text-muted);
+  font-size: 10px;
+  margin-left: auto;
+}
+
+.tool-step-body {
+  padding: 0 12px 10px 36px;
+}
+
+.tool-step-body pre {
+  background: #1e293b;
+  color: #cbd5e1;
+  padding: 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* ---- Input area ---- */
+.chat-input-area {
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 10px;
   align-items: flex-end;
 }
 
 .chat-input {
   flex: 1;
-  background: #16213e;
-  color: #e0e0e0;
-  border: 1px solid #0f3460;
-  border-radius: 8px;
-  padding: 10px 14px;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
   font-size: 14px;
   resize: none;
   outline: none;
   font-family: inherit;
-  min-height: 42px;
+  min-height: 44px;
   max-height: 150px;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .chat-input:focus {
-  border-color: #e94560;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
 }
 
 .btn-send,
 .btn-stop {
-  padding: 10px 20px;
+  padding: 12px 22px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius);
   cursor: pointer;
   font-size: 14px;
+  font-weight: 500;
   white-space: nowrap;
+  transition: all 0.2s;
 }
 
 .btn-send {
-  background: #e94560;
+  background: var(--primary);
   color: white;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
 }
 
 .btn-send:hover:not(:disabled) {
-  background: #c73b54;
+  background: var(--primary-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
 }
 
 .btn-send:disabled {
-  background: #333;
-  color: #666;
+  background: var(--bg-input);
+  color: var(--text-muted);
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 .btn-stop {
-  background: #333;
-  color: #e0e0e0;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
 }
 
 .btn-stop:hover {
-  background: #444;
+  background: var(--border);
 }
 </style>

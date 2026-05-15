@@ -112,6 +112,23 @@ async def update_session(session_id: str, req: UpdateSessionRequest) -> dict:
 
 @router.delete("/{session_id}")
 async def delete_session(session_id: str) -> dict:
+    # Destroy sandbox and workspace before removing DB records
+    import shutil
+    from pathlib import Path
+    from app.config import settings
+    from app.tools.sandbox import get_sandbox_manager
+
+    workspace_path = Path(settings.workspaces_base) / session_id
+    try:
+        get_sandbox_manager().destroy_for_session(workspace_path)
+    except Exception:
+        pass
+    try:
+        if workspace_path.exists():
+            shutil.rmtree(workspace_path, ignore_errors=True)
+    except Exception:
+        pass
+
     async with async_session_factory() as db:
         await db.execute(delete(Session).where(Session.id == session_id))
         await db.commit()

@@ -21,11 +21,24 @@ export async function apiDelete(path: string): Promise<void> {
   if (!res.ok) throw new Error(`API error: ${res.status}`)
 }
 
+export interface SSEData {
+  type: string
+  content?: string
+  session_id?: string
+  // permission_request
+  request_id?: string
+  level?: string
+  // tool_call / tool_result
+  tool?: string
+  args?: Record<string, unknown>
+  success?: boolean
+  result?: string
+}
+
 export function streamChat(
   sessionId: string,
   message: string,
-  agentType: string,
-  onChunk: (data: { type: string; content?: string; session_id?: string }) => void,
+  onChunk: (data: SSEData) => void,
   onError: (err: Error) => void,
   onDone: () => void
 ): AbortController {
@@ -34,7 +47,7 @@ export function streamChat(
   fetch(`${BASE_URL}/api/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, message, agent_type: agentType }),
+    body: JSON.stringify({ session_id: sessionId, message }),
     signal: controller.signal,
   })
     .then(async (res) => {

@@ -9,6 +9,7 @@ from app.tools.base import tool
 @tool(
     name="search_web",
     description="搜索互联网获取最新信息，支持中英文关键词",
+    permission_level="read",
     parameters={
         "type": "object",
         "properties": {

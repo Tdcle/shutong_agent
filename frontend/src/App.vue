@@ -35,8 +35,8 @@ onMounted(() => {
   height: 100vh;
   width: 100vw;
   overflow: hidden;
-  background: #1a1a2e;
-  color: #e0e0e0;
+  background: var(--bg);
+  color: var(--text);
 }
 
 .main-area {
@@ -44,5 +44,6 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
 }
 </style>

@@ -27,6 +27,7 @@ from app.api.memory_api import router as memory_router
 from app.api.skills_api import router as skills_router
 from app.models.database import init_db
 from app.config import settings
+from app.tools.sandbox import get_sandbox_manager
 
 
 @asynccontextmanager
@@ -37,7 +38,35 @@ async def lifespan(app: FastAPI):
         print(f"[OK] Database initialized")
     except Exception as e:
         print(f"[WARN] Database init failed (retry on first request): {e}")
-    yield
+
+    # Background sandbox cleanup task
+    cleanup_task = None
+    async def _sandbox_cleanup_loop():
+        from app.tools.sandbox import get_sandbox_manager
+        while True:
+            await asyncio.sleep(300)  # Every 5 minutes
+            try:
+                get_sandbox_manager().close_inactive()
+            except Exception:
+                pass
+
+    cleanup_task = asyncio.create_task(_sandbox_cleanup_loop())
+
+    try:
+        yield
+    finally:
+        try:
+            get_sandbox_manager().close_inactive()
+        except Exception:
+            pass
+
+    # Shutdown: cancel cleanup task
+    if cleanup_task:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
@@ -112,37 +141,59 @@ async def run_cli():
     print("=" * 50)
 
     agent_service = AgentService()
+    from app.tools.workspace import create_session_workspace, set_session_workspace
+    from app.tools.sandbox import get_sandbox_manager
+    import shutil
+
     session_id = "cli_session"
+    workspace_path = create_session_workspace(session_id)
+    set_session_workspace(workspace_path)
+    print(f"Workspace: {workspace_path}")
 
-    while True:
-        try:
-            question = input("\n> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
+    try:
+        while True:
+            try:
+                question = input("\n> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye!")
+                break
 
-        if not question:
-            continue
-        if question.lower() == "exit":
-            break
-        if question.lower() == "clear":
-            session_id = f"cli_session_{asyncio.get_event_loop().time()}"
-            print("[Session cleared]")
-            continue
+            if not question:
+                continue
+            if question.lower() == "exit":
+                break
+            if question.lower() == "clear":
+                # Clean up old workspace and create new one
+                get_sandbox_manager().destroy_for_session(workspace_path)
+                shutil.rmtree(workspace_path, ignore_errors=True)
+                session_id = f"cli_session_{asyncio.get_event_loop().time()}"
+                workspace_path = create_session_workspace(session_id)
+                set_session_workspace(workspace_path)
+                print(f"[Session cleared, new workspace: {workspace_path}]")
+                continue
 
-        print()
-        collected = []
-        try:
-            async for chunk in agent_service.stream_chat(question, session_id):
-                print(chunk, end="", flush=True)
-                collected.append(chunk)
             print()
+            collected = []
+            try:
+                async for event in agent_service.stream_chat(question, session_id):
+                    if isinstance(event, dict):
+                        if event.get("type") == "tool_call":
+                            print(f"\n  [{event.get('tool')}]", end=" ", flush=True)
+                        elif event.get("type") == "tool_result":
+                            status = "OK" if event.get("success") else "FAIL"
+                            print(f"({status})", end="", flush=True)
+                    else:
+                        print(event, end="", flush=True)
+                        collected.append(event)
+                print()
 
-            # Trigger memory extraction after each turn
-            answer = "".join(collected)
-            await agent_service.finalize_turn(session_id, question, answer)
-        except Exception as e:
-            print(f"\n[Error] {e}")
+                answer = "".join(collected)
+                await agent_service.finalize_turn(session_id, question, answer)
+            except Exception as e:
+                print(f"\n[Error] {e}")
+    finally:
+        get_sandbox_manager().destroy_for_session(workspace_path)
+        shutil.rmtree(workspace_path, ignore_errors=True)
 
 
 if __name__ == "__main__":

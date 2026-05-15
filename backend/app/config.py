@@ -76,8 +76,28 @@ class Settings(BaseSettings):
     memory_decay_min_importance: float = 0.15
     memory_decay_recall_threshold: int = 2
 
+    # ===== 工作区 =====
+    workspaces_base: str = str(Path(__file__).parent.parent / "workspaces")  # session 隔离工作区根目录
+
+    # ===== Sandbox =====
+    sandbox_idle_ttl_seconds: int = 1200     # 空闲 20 分钟自动回收
+    sandbox_max_lifetime_seconds: int = 3600  # 存活总时长 60 分钟自动回收
+
     # ===== Computer Use =====
     shell_timeout_seconds: int = 120
+    shell_block_network: bool = True
+    shell_block_dangerous_commands: bool = True
+    shell_reject_absolute_paths: bool = True
+    shell_network_proxy_url: str = "http://127.0.0.1:9"
+    shell_max_command_length: int = 2000
+    shell_allow_nested_shells: bool = False
+    shell_blocked_command_tokens: str = (
+        "curl,wget,Invoke-WebRequest,irm,iwr,scp,sftp,ftp,telnet,ssh,"
+        "powershell -EncodedCommand,pwsh -EncodedCommand,certutil -urlcache,"
+        "bitsadmin,regsvr32,rundll32,mshta,wscript,cscript,wmic,netsh,"
+        "schtasks,at,shutdown,restart-computer,stop-computer,taskkill,"
+        "takeown,icacls,mklink,subst,format,mountvol"
+    )
 
 
 settings = Settings()

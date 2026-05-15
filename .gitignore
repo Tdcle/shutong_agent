@@ -42,4 +42,5 @@ Thumbs.db
 
 # Local runtime data
 backend/data/
+backend/workspaces/
 *.db

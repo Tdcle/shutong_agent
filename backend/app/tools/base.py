@@ -13,6 +13,7 @@ class ToolDef:
     description: str
     fn: Callable[..., Any]
     parameters: dict = field(default_factory=dict)  # JSON Schema for parameters
+    permission_level: str = "read"  # read | write | destroy | shell
 
 
 class ToolRegistry:
@@ -21,8 +22,11 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, ToolDef] = {}
 
-    def register(self, name: str, description: str, fn: Callable, parameters: dict | None = None):
-        self._tools[name] = ToolDef(name=name, description=description, fn=fn, parameters=parameters or {})
+    def register(self, name: str, description: str, fn: Callable, parameters: dict | None = None, permission_level: str = "read"):
+        self._tools[name] = ToolDef(
+            name=name, description=description, fn=fn,
+            parameters=parameters or {}, permission_level=permission_level,
+        )
 
     def get(self, name: str) -> ToolDef | None:
         return self._tools.get(name)
@@ -45,18 +49,17 @@ class ToolRegistry:
         ]
 
 
-def tool(name: str, description: str, parameters: dict | None = None):
-    """Decorator to register a tool in the default registry.
+def tool(name: str, description: str, parameters: dict | None = None, permission_level: str = "read"):
+    """Decorator to mark a function as a tool.
 
     Usage:
-        @tool("search", "Search the web", {"type": "object", "properties": {"q": {"type": "string"}}})
-        def search(q: str) -> str: ...
+        @tool("edit_file", "精确编辑文件", ..., permission_level="write")
+        def edit_file(...) -> str: ...
     """
     import inspect
 
     def decorator(fn: Callable):
         sig = inspect.signature(fn)
-        # Auto-generate parameters schema from function signature if not provided
         if parameters is None and name not in _get_params(fn):
             props = {}
             for p_name, p in sig.parameters.items():
@@ -68,6 +71,7 @@ def tool(name: str, description: str, parameters: dict | None = None):
             fn._tool_params = parameters
         fn._tool_name = name
         fn._tool_description = description
+        fn._tool_permission_level = permission_level
         return fn
 
     return decorator

@@ -37,7 +37,10 @@ class EmbeddingEngine:
             from sentence_transformers import SentenceTransformer
             logger.info("Loading local embedding model: %s (first use downloads ~100MB)...", self.model_name)
             self._local_model = SentenceTransformer(self.model_name)
-            dim = self._local_model.get_sentence_embedding_dimension()
+            try:
+                dim = self._local_model.get_embedding_dimension()
+            except AttributeError:
+                dim = self._local_model.get_sentence_embedding_dimension()
             logger.info("Local embedding model ready, dim=%d", dim)
         return self._local_model
 

@@ -23,7 +23,7 @@ export function useSessions() {
     }
   }
 
-  async function createSession(firstMessage?: string): Promise<string> {
+  async function createSession(_firstMessage?: string): Promise<string> {
     // Sessions are created on first chat message, so we just start with empty id
     currentSessionId.value = ''
     return ''
