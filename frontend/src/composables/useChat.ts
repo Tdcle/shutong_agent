@@ -12,7 +12,9 @@ export interface ToolCallEntry {
   tool: string
   args: Record<string, unknown>
   status: 'running' | 'done'
+  visible: boolean
   success?: boolean
+  warning?: boolean
   result?: string
 }
 
@@ -21,20 +23,26 @@ export interface PermissionRequest {
   tool: string
   level: 'read' | 'write' | 'destroy' | 'shell'
   args: Record<string, unknown>
+  purpose: string
 }
 
 const TOOL_LABELS: Record<string, string> = {
   read_file: '读取文件',
   write_file: '写入文件',
   edit_file: '编辑文件',
-  grep: '搜索内容',
-  glob: '查找文件',
+  grep: '内容搜索',
+  glob: '文件匹配',
   move_file: '移动文件',
+  copy_file: '复制文件',
   delete_file: '删除文件',
-  list_files: '列出目录',
-  search_web: '搜索互联网',
+  list_files: '列出文件',
+  move_paths: '批量移动',
+  copy_paths: '批量复制',
+  delete_paths: '批量删除',
+  search_web: '联网搜索',
+  execute_python: '执行 Python',
   execute_shell: '执行命令',
-  read_skill: '加载技能',
+  read_skill: '读取技能说明',
 }
 
 function toolLabel(name: string): string {
@@ -42,28 +50,33 @@ function toolLabel(name: string): string {
 }
 
 function toolArgPreview(args: Record<string, unknown>): string {
-  // Show the most relevant arg: path > pattern > query > command > first arg
+  if (Array.isArray(args.paths)) {
+    const items = args.paths.map((item) => String(item))
+    if (items.length === 1) return items[0]
+    return `${items[0]} 等 ${items.length} 项`
+  }
   if (args.path) return String(args.path)
   if (args.pattern) return String(args.pattern)
   if (args.query) return String(args.query)
+  if (args.code) return String(args.code).slice(0, 60)
   if (args.command) return String(args.command).slice(0, 60)
-  if (args.source) return `${args.source} → ${args.destination || ''}`
+  if (args.source) return `${args.source} -> ${args.destination || ''}`
+  if (args.root) return String(args.root)
+
   const keys = Object.keys(args)
   if (keys.length > 0) {
-    const v = String(args[keys[0]]).slice(0, 60)
-    return v
+    return String(args[keys[0]]).slice(0, 60)
   }
   return ''
 }
 
-// Module-level state
 const messages = ref<UIMessage[]>([])
 const isStreaming = ref(false)
 const abortController = ref<AbortController | null>(null)
 const pendingPermission = ref<PermissionRequest | null>(null)
 const toolCalls = ref<ToolCallEntry[]>([])
 
-let _toolSeq = 0
+let toolSeq = 0
 
 export function useChat() {
   function addUserMessage(content: string) {
@@ -97,38 +110,35 @@ export function useChat() {
 
     try {
       const data = await apiGet<{ messages: Array<{ role: string; content: string }> }>(`/api/sessions/${sessionId}`)
-      messages.value = (data.messages || []).map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content || '',
+      messages.value = (data.messages || []).map((message) => ({
+        role: message.role as 'user' | 'assistant',
+        content: message.content || '',
         isStreaming: false,
       }))
-    } catch (e) {
-      console.error('Failed to load session messages:', e)
+    } catch (error) {
+      console.error('Failed to load session messages:', error)
     }
   }
 
-  async function respondPermission(requestId: string, approved: boolean, remember: boolean = false) {
+  async function respondPermission(requestId: string, approved: boolean, remember = false) {
     try {
       await apiPost('/api/chat/permission-response', {
         request_id: requestId,
         approved,
         remember,
       })
-    } catch (e) {
-      console.error('Permission response failed:', e)
+    } catch (error) {
+      console.error('Permission response failed:', error)
     }
   }
 
-  async function sendMessage(
-    sessionId: string,
-    content: string,
-  ) {
+  async function sendMessage(sessionId: string, content: string) {
     addUserMessage(content)
     addAssistantPlaceholder()
     isStreaming.value = true
     pendingPermission.value = null
     toolCalls.value = []
-    _toolSeq = 0
+    toolSeq = 0
 
     return new Promise<string>((resolve, reject) => {
       const controller = streamChat(
@@ -141,21 +151,26 @@ export function useChat() {
               break
             case 'tool_call':
               toolCalls.value.push({
-                id: `tc_${_toolSeq++}`,
+                id: `tc_${toolSeq++}`,
                 tool: data.tool || '',
                 args: data.args || {},
                 status: 'running',
+                visible: data.visible !== false,
               })
               break
-            case 'tool_result':
-              // Find the running tool call and update it
-              const running = [...toolCalls.value].reverse().find(tc => tc.status === 'running' && tc.tool === data.tool)
+            case 'tool_result': {
+              const running = [...toolCalls.value]
+                .reverse()
+                .find((entry) => entry.status === 'running' && entry.tool === data.tool)
               if (running) {
                 running.status = 'done'
+                running.visible = data.visible !== false
                 running.success = data.success
+                 running.warning = data.warning === true
                 running.result = data.result
               }
               break
+            }
             case 'done':
               finishStreaming()
               resolve(data.session_id || sessionId)
@@ -170,15 +185,16 @@ export function useChat() {
                 tool: data.tool || '',
                 level: (data.level as PermissionRequest['level']) || 'write',
                 args: data.args || {},
+                purpose: data.purpose || '',
               }
               break
           }
         },
-        (err) => {
+        (error) => {
           finishStreaming()
-          reject(err)
+          reject(error)
         },
-        () => {}
+        () => {},
       )
       abortController.value = controller
     })

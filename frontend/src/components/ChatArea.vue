@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, watch } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 import { useChat } from '../composables/useChat'
 import PermissionDialog from './PermissionDialog.vue'
 
@@ -11,18 +11,35 @@ const emit = defineEmits<{
   sessionCreated: [id: string]
 }>()
 
-const { messages, isStreaming, pendingPermission, toolCalls, toolLabel, toolArgPreview, loadMessages, sendMessage, respondPermission, cancelStreaming, clearMessages } = useChat()
+const {
+  messages,
+  isStreaming,
+  pendingPermission,
+  toolCalls,
+  toolLabel,
+  toolArgPreview,
+  loadMessages,
+  sendMessage,
+  respondPermission,
+  cancelStreaming,
+  clearMessages,
+} = useChat()
+
 const inputText = ref('')
 const chatContainer = ref<HTMLElement | null>(null)
 const expandedTools = ref<Set<string>>(new Set())
 
-watch(() => props.sessionId, (newId) => {
-  if (newId) {
-    loadMessages(newId)
-  } else {
-    clearMessages()
-  }
-}, { immediate: true })
+watch(
+  () => props.sessionId,
+  (newId) => {
+    if (newId) {
+      loadMessages(newId)
+    } else {
+      clearMessages()
+    }
+  },
+  { immediate: true },
+)
 
 async function handleSend() {
   const text = inputText.value.trim()
@@ -36,15 +53,15 @@ async function handleSend() {
     if (newSessionId && !props.sessionId) {
       emit('sessionCreated', newSessionId)
     }
-  } catch (e) {
-    console.error('Chat error:', e)
+  } catch (error) {
+    console.error('Chat error:', error)
   }
 
   await nextTick()
   scrollToBottom()
 }
 
-async function handlePermissionApprove(requestId: string, remember: boolean = false) {
+async function handlePermissionApprove(requestId: string, remember = false) {
   pendingPermission.value = null
   await respondPermission(requestId, true, remember)
 }
@@ -54,27 +71,27 @@ async function handlePermissionDeny(requestId: string) {
   await respondPermission(requestId, false)
 }
 
-function toggleToolExpand(tcId: string) {
+function toggleToolExpand(toolCallId: string) {
   const next = new Set(expandedTools.value)
-  if (next.has(tcId)) {
-    next.delete(tcId)
+  if (next.has(toolCallId)) {
+    next.delete(toolCallId)
   } else {
-    next.add(tcId)
+    next.add(toolCallId)
   }
   expandedTools.value = next
 }
 
-function handleKeydown(e: KeyboardEvent) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault()
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
     handleSend()
   }
 }
 
-function autoResize(e: Event) {
-  const el = e.target as HTMLTextAreaElement
-  el.style.height = 'auto'
-  el.style.height = Math.min(el.scrollHeight, 150) + 'px'
+function autoResize(event: Event) {
+  const element = event.target as HTMLTextAreaElement
+  element.style.height = 'auto'
+  element.style.height = `${Math.min(element.scrollHeight, 150)}px`
 }
 
 function scrollToBottom() {
@@ -87,7 +104,7 @@ let codeBlockId = 0
 
 function formatContent(text: string): string {
   return text
-    .replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) => {
+    .replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang, code) => {
       const id = `code-block-${++codeBlockId}`
       const langLabel = lang || 'code'
       return `<div class="code-block" data-id="${id}"><div class="code-header"><span class="code-lang">${langLabel}</span><button class="code-copy-btn" data-copy-target="${id}">复制</button></div><pre><code id="${id}">${code}</code></pre></div>`
@@ -96,18 +113,21 @@ function formatContent(text: string): string {
     .replace(/\n/g, '<br>')
 }
 
-function handleContentClick(e: Event) {
-  const target = e.target as HTMLElement
-  if (target.classList.contains('code-copy-btn')) {
-    const id = target.getAttribute('data-copy-target')
-    if (!id) return
-    const codeEl = document.getElementById(id)
-    if (codeEl) {
-      navigator.clipboard.writeText(codeEl.textContent || '')
-      target.textContent = '已复制'
-      setTimeout(() => { target.textContent = '复制' }, 1500)
-    }
-  }
+function handleContentClick(event: Event) {
+  const target = event.target as HTMLElement
+  if (!target.classList.contains('code-copy-btn')) return
+
+  const id = target.getAttribute('data-copy-target')
+  if (!id) return
+
+  const codeEl = document.getElementById(id)
+  if (!codeEl) return
+
+  navigator.clipboard.writeText(codeEl.textContent || '')
+  target.textContent = '已复制'
+  setTimeout(() => {
+    target.textContent = '复制'
+  }, 1500)
 }
 </script>
 
@@ -115,9 +135,9 @@ function handleContentClick(e: Event) {
   <div class="chat-area">
     <div ref="chatContainer" class="chat-messages">
       <div v-if="messages.length === 0" class="welcome">
-        <h1>书童</h1>
-        <p>你的贴身智能助手 · 会记忆 · 会搜索 · 会写代码</p>
-        <p class="welcome-hint">发送消息开始对话</p>
+        <h1>数通 Agent</h1>
+        <p>可以帮你查看项目、修改文件、执行命令，也能处理日常文件整理和本地自动化任务。</p>
+        <p class="welcome-hint">直接输入你的目标即可，复杂任务也可以一步一步来。</p>
       </div>
 
       <template v-for="(msg, idx) in messages" :key="'msg_' + idx">
@@ -134,24 +154,29 @@ function handleContentClick(e: Event) {
         </div>
       </template>
 
-      <!-- Tool call steps — show inline during streaming -->
-      <div v-if="toolCalls.length > 0" class="tool-steps-section">
+      <div v-if="toolCalls.some((item) => item.visible)" class="tool-steps-section">
         <div
-          v-for="tc in toolCalls"
+          v-for="tc in toolCalls.filter((item) => item.visible)"
           :key="tc.id"
           class="tool-step"
-          :class="{ 'is-running': tc.status === 'running', 'is-done': tc.status === 'done', 'is-error': tc.status === 'done' && !tc.success }"
+          :class="{
+            'is-running': tc.status === 'running',
+            'is-done': tc.status === 'done',
+            'is-warning': tc.status === 'done' && tc.warning,
+            'is-error': tc.status === 'done' && !tc.success,
+          }"
           @click="toggleToolExpand(tc.id)"
         >
           <div class="tool-step-header">
             <span class="tool-step-status">
               <span v-if="tc.status === 'running'" class="spinner"></span>
+              <span v-else-if="tc.warning">&#9888;</span>
               <span v-else-if="tc.success">&#10003;</span>
               <span v-else>&#10007;</span>
             </span>
             <span class="tool-step-name">{{ toolLabel(tc.tool) }}</span>
             <span class="tool-step-arg">{{ toolArgPreview(tc.args) }}</span>
-            <span class="tool-step-expand">{{ expandedTools.has(tc.id) ? '▾' : '▸' }}</span>
+            <span class="tool-step-expand">{{ expandedTools.has(tc.id) ? '收起' : '展开' }}</span>
           </div>
           <div v-if="expandedTools.has(tc.id) && tc.result" class="tool-step-body">
             <pre>{{ tc.result }}</pre>
@@ -164,7 +189,7 @@ function handleContentClick(e: Event) {
       <textarea
         v-model="inputText"
         class="chat-input"
-        placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
+        placeholder="输入你的问题或任务...（Enter 发送，Shift+Enter 换行）"
         rows="1"
         :disabled="isStreaming"
         @keydown="handleKeydown"
@@ -360,15 +385,26 @@ function handleContentClick(e: Event) {
   animation: typing 1.4s infinite;
 }
 
-.typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
-.typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
-
-@keyframes typing {
-  0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
-  30% { opacity: 1; transform: scale(1); }
+.typing-indicator span:nth-child(2) {
+  animation-delay: 0.2s;
 }
 
-/* ---- Tool call steps ---- */
+.typing-indicator span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes typing {
+  0%, 60%, 100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+
+  30% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 .tool-steps-section {
   margin-top: 4px;
   margin-bottom: 16px;
@@ -399,6 +435,10 @@ function handleContentClick(e: Event) {
   border-left: 3px solid var(--success);
 }
 
+.tool-step.is-warning {
+  border-left: 3px solid var(--warning);
+}
+
 .tool-step.is-error {
   border-left: 3px solid var(--danger);
 }
@@ -422,6 +462,10 @@ function handleContentClick(e: Event) {
   color: var(--danger);
 }
 
+.tool-step.is-warning .tool-step-status {
+  color: var(--warning);
+}
+
 .tool-step.is-running .tool-step-status {
   color: var(--warning);
 }
@@ -437,7 +481,9 @@ function handleContentClick(e: Event) {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .tool-step-name {
@@ -479,7 +525,6 @@ function handleContentClick(e: Event) {
   line-height: 1.4;
 }
 
-/* ---- Input area ---- */
 .chat-input-area {
   padding: 16px 0;
   border-top: 1px solid var(--border);

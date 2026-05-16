@@ -34,8 +34,9 @@ class Settings(BaseSettings):
     llm_compress_model: str = _current_profile.llm_compress_model
     llm_compress_temperature: float = _current_profile.llm_compress_temperature
 
-    # ===== Embedding（始终本地运行）=====
-    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    # ===== Embedding =====
+    # 模型名含 '/' 使用本地 sentence-transformers；不含 '/' 走 API（Ollama 或 DashScope）
+    embedding_model: str = "bge-m3"
     embedding_recall_threshold: float = 0.3
 
     # ===== 搜索 =====
@@ -82,12 +83,14 @@ class Settings(BaseSettings):
     # ===== Sandbox =====
     sandbox_idle_ttl_seconds: int = 1200     # 空闲 20 分钟自动回收
     sandbox_max_lifetime_seconds: int = 3600  # 存活总时长 60 分钟自动回收
+    agent_python_executable: str = str(Path(__file__).parent.parent / ".agent_runtime" / "Scripts" / "python.exe")
+    python_timeout_seconds: int = 120
 
     # ===== Computer Use =====
     shell_timeout_seconds: int = 120
     shell_block_network: bool = True
     shell_block_dangerous_commands: bool = True
-    shell_reject_absolute_paths: bool = True
+    shell_reject_absolute_paths: bool = False  # No longer hard-block; user approval suffices
     shell_network_proxy_url: str = "http://127.0.0.1:9"
     shell_max_command_length: int = 2000
     shell_allow_nested_shells: bool = False

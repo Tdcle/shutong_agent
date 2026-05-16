@@ -1,10 +1,8 @@
-"""Agent Service — orchestrates agent execution, memory, and tools for API layer."""
+"""Agent service，负责组装工具、系统提示词和会话执行入口。"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 import platform
 import socket
 from collections.abc import AsyncIterator
@@ -15,32 +13,31 @@ from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 
 from app.config import settings
-from app.core import ReactAgent, PlanExecuteAgent, ReflectionAgent, HITLAgent
+from app.core import PlanExecuteAgent, ReactAgent, ReflectionAgent
 from app.memory.manager import MemoryManager
-from app.memory.short_term import ShortTermMemory
 from app.skill.registry import SkillRegistry
-from app.tools.base import ToolRegistry, ToolDef
+from app.tools.base import ToolDef, ToolRegistry
 from app.tools.permissions import PermissionBroker
 from app.tools.workspace import get_session_workspace
 
 logger = logging.getLogger(__name__)
 
 
-def _fn_to_langchain(td: ToolDef) -> StructuredTool:
-    """Convert a ToolDef (sync or async function) to a LangChain StructuredTool."""
+def _fn_to_langchain(tool_def: ToolDef) -> StructuredTool:
+    """Convert ToolDef to a LangChain StructuredTool."""
     import inspect
-    if inspect.iscoroutinefunction(td.fn):
+
+    if inspect.iscoroutinefunction(tool_def.fn):
         return StructuredTool.from_function(
-            coroutine=td.fn,
-            name=td.name,
-            description=td.description,
+            coroutine=tool_def.fn,
+            name=tool_def.name,
+            description=tool_def.description,
         )
-    else:
-        return StructuredTool.from_function(
-            func=td.fn,
-            name=td.name,
-            description=td.description,
-        )
+    return StructuredTool.from_function(
+        func=tool_def.fn,
+        name=tool_def.name,
+        description=tool_def.description,
+    )
 
 
 class AgentService:
@@ -66,83 +63,105 @@ class AgentService:
         self._built = True
 
     def _build_tools(self):
-        """Build tool registry with built-in tools + skill tools."""
+        """Build tool registry with built-in tools and skill tools."""
         from app.tools.file_ops import (
-            read_file, write_file, edit_file, grep, glob, move_file, delete_file, list_files,
+            copy_file,
+            copy_paths,
+            delete_file,
+            delete_paths,
+            edit_file,
+            glob,
+            grep,
+            list_files,
+            move_file,
+            move_paths,
+            read_file,
+            write_file,
         )
         from app.tools.search import search_web
-        from app.tools.shell import execute_shell
+        from app.tools.shell import execute_python, execute_shell
 
         self.tool_registry = ToolRegistry()
 
-        # Helper to register a decorated tool function
         def register(fn):
             name = getattr(fn, "_tool_name", fn.__name__)
             desc = getattr(fn, "_tool_description", "")
             params = getattr(fn, "_tool_params", {})
             perm = getattr(fn, "_tool_permission_level", "read")
-            self.tool_registry.register(name, desc, fn, params, permission_level=perm)
+            visible = getattr(fn, "_tool_visible", True)
+            self.tool_registry.register(name, desc, fn, params, permission_level=perm, visible=visible)
 
-        # File tools
-        for fn in [read_file, write_file, edit_file, grep, glob, move_file, delete_file, list_files]:
+        for fn in [
+            read_file,
+            write_file,
+            edit_file,
+            grep,
+            glob,
+            move_file,
+            copy_file,
+            delete_file,
+            list_files,
+            move_paths,
+            copy_paths,
+            delete_paths,
+        ]:
             register(fn)
 
-        # Search
         register(search_web)
-
-        # Shell
         register(execute_shell)
+        register(execute_python)
 
-        # Skill read tool
         skill_tool = self.skill_registry.create_read_skill_tool()
         self.tool_registry.register(
-            skill_tool.name, skill_tool.description, skill_tool.fn,
-            skill_tool.parameters, permission_level="read",
+            skill_tool.name,
+            skill_tool.description,
+            skill_tool.fn,
+            skill_tool.parameters,
+            permission_level="read",
         )
 
-        # Build lookup map
-        self._tool_defs = {td.name: td for td in self.tool_registry.get_all()}
-
-        # Convert to LangChain tools
-        self._langchain_tools = [_fn_to_langchain(td) for td in self.tool_registry.get_all()]
+        self._tool_defs = {tool_def.name: tool_def for tool_def in self.tool_registry.get_all()}
+        self._langchain_tools = [_fn_to_langchain(tool_def) for tool_def in self.tool_registry.get_all()]
 
     def _db_messages_to_lc(self, db_messages: list) -> list[BaseMessage]:
         """Convert DB Message objects to LangChain messages."""
-        lc_messages = []
-        for m in db_messages[-30:]:
-            if m.role == "user":
-                lc_messages.append(HumanMessage(content=m.content))
-            elif m.role == "assistant":
-                lc_messages.append(AIMessage(content=m.content))
-            elif m.role == "system":
-                lc_messages.append(SystemMessage(content=m.content))
+        lc_messages: list[BaseMessage] = []
+        for message in db_messages[-30:]:
+            if message.role == "user":
+                lc_messages.append(HumanMessage(content=message.content))
+            elif message.role == "assistant":
+                lc_messages.append(AIMessage(content=message.content))
+            elif message.role == "system":
+                lc_messages.append(SystemMessage(content=message.content))
         return lc_messages
 
     def _build_system_prompt(self, workspace_path: str = "") -> str:
-        """Build system prompt with skill list and runtime environment info."""
-        parts = []
+        """Build the runtime prompt with environment details and installed skills."""
+        parts: list[str] = []
 
-        # Runtime environment info — tells the agent where it's running
         home = str(Path.home())
         desktop = str(Path.home() / "Desktop")
         hostname = socket.gethostname()
 
         env_lines = [
             "## 运行环境",
-            f"- 操作系统: {platform.system()} {platform.release()}",
-            f"- 主机名: {hostname}",
-            f"- 用户主目录: {home}",
-            f"- 桌面路径: {desktop}",
+            f"- 操作系统：{platform.system()} {platform.release()}",
+            f"- 主机名：{hostname}",
+            f"- 用户主目录：{home}",
+            f"- 桌面目录：{desktop}",
         ]
         if workspace_path:
-            env_lines.append(f"- 当前工作目录: {workspace_path}")
+            env_lines.append(f"- 当前会话工作区：{workspace_path}")
         env_lines.append("")
-        env_lines.append('相对路径默认解析到工作目录。用户说"桌面"时请使用上面的桌面路径。')
+        env_lines.append(
+            "如果用户提到“桌面”“主目录”或“当前工作区”，请以上面的绝对路径为准，并在需要时显式引用。"
+        )
         parts.append("\n".join(env_lines))
 
         skills_prompt = self.skill_registry.get_skills_prompt()
         if skills_prompt:
             parts.append(skills_prompt)
+
         return "\n\n".join(parts)
 
     def _make_react_agent(self, system_prompt: str) -> ReactAgent:
@@ -164,22 +183,23 @@ class AgentService:
         self._ensure_built()
         lc_history = self._db_messages_to_lc(history) if history else []
 
-        # Load L1 memory context
         try:
             l1_context = self.memory_manager.load_l1_context(query=question)
             if l1_context:
                 lc_history.insert(0, SystemMessage(content=l1_context))
-        except Exception as e:
-            logger.warning("Failed to load memory context: %s", e)
+        except Exception as exc:
+            logger.warning("Failed to load memory context: %s", exc)
 
-        ws = get_session_workspace()
-        system_prompt = self._build_system_prompt(str(ws) if ws else "")
+        workspace = get_session_workspace()
+        system_prompt = self._build_system_prompt(str(workspace) if workspace else "")
 
         if agent_type == "plan_execute":
             agent = PlanExecuteAgent(tools=self._langchain_tools, llm=self.llm)
             result = await agent.call(question)
             yield str(result)
-        elif agent_type == "reflection":
+            return
+
+        if agent_type == "reflection":
             agent = ReflectionAgent(
                 tools=self._langchain_tools,
                 llm=self.llm,
@@ -187,17 +207,18 @@ class AgentService:
             )
             async for chunk in agent.stream(question, lc_history):
                 yield chunk
-        else:  # react
-            agent = self._make_react_agent(system_prompt)
-            async for event in agent.stream(question, lc_history, permission_broker=permission_broker):
-                yield event
+            return
+
+        agent = self._make_react_agent(system_prompt)
+        async for event in agent.stream(question, lc_history, permission_broker=permission_broker):
+            yield event
 
     async def finalize_turn(self, session_id: str, user_msg: str, assistant_msg: str):
         """Called after each conversation turn to persist memories."""
         try:
             await self.memory_manager.post_turn(session_id, user_msg, assistant_msg)
-        except Exception as e:
-            logger.warning("Memory post_turn failed: %s", e)
+        except Exception as exc:
+            logger.warning("Memory post_turn failed: %s", exc)
 
     async def send_chat(
         self,
@@ -209,15 +230,18 @@ class AgentService:
         """Non-streaming chat."""
         self._ensure_built()
         lc_history = self._db_messages_to_lc(history) if history else []
-        ws = get_session_workspace()
-        system_prompt = self._build_system_prompt(str(ws) if ws else "")
+        workspace = get_session_workspace()
+        system_prompt = self._build_system_prompt(str(workspace) if workspace else "")
 
         if agent_type == "plan_execute":
             agent = PlanExecuteAgent(tools=self._langchain_tools, llm=self.llm)
         elif agent_type == "reflection":
-            agent = ReflectionAgent(tools=self._langchain_tools, llm=self.llm, system_prompt=system_prompt)
+            agent = ReflectionAgent(
+                tools=self._langchain_tools,
+                llm=self.llm,
+                system_prompt=system_prompt,
+            )
         else:
             agent = self._make_react_agent(system_prompt)
 
-        result = await agent.call(question, lc_history)
-        return result
+        return await agent.call(question, lc_history)

@@ -1,20 +1,10 @@
-"""ReAct Agent — migrated from Java SimpleReactAgent.
-
-Uses LangGraph's create_react_agent with added:
-- Context compression (migrated from compressIfNeeded)
-- Conversation memory integration
-- Max rounds enforcement
-- Streaming support
-- Permission check for dangerous tool calls
-"""
+"""ReAct 风格 Agent，负责工具调用、权限中断和上下文压缩。"""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
@@ -26,45 +16,118 @@ from app.tools.permissions import PermissionBroker, PermissionLevel
 
 logger = logging.getLogger(__name__)
 
-REACT_SYSTEM_PROMPT = """## 角色
-你是一个严格遵循 ReAct 模式的智能 AI 助手，通过 Reasoning → Act(工具调用) → Observation 的反复循环来逐步完成任务。
+FAILURE_PREFIXES = (
+    "error:",
+    "path rejected:",
+    "read failed:",
+    "write failed:",
+    "edit failed:",
+    "move failed:",
+    "copy failed:",
+    "delete failed:",
+    "command execution failed:",
+    "python execution failed:",
+    "command blocked by sandbox policy:",
+    "sandbox sync failed",
+    "grep failed:",
+    "invalid regex:",
+    "invalid glob pattern:",
+)
 
-## 工具使用指南
-- **读取文件**：使用 read_file
-- **修改已有文件**：优先使用 edit_file（精确替换），不要用 write_file 重写整个文件
-- **创建新文件**：使用 write_file
-- **搜索文件内容**：使用 grep（支持正则表达式）
-- **查找文件**：使用 glob（支持 ** 递归匹配，如 "**/*.py"）
-- **移动/重命名**：使用 move_file
-- **删除文件**：使用 delete_file
-- **列出目录**：使用 list_files
-- **执行命令**：使用 execute_shell
-- **搜索互联网**：使用 search_web
-- **加载技能**：使用 read_skill
+WARNING_PREFIXES = (
+    "warning:",
+)
 
-## edit_file 使用要点
-- old_string 必须在文件中唯一匹配，否则编辑会失败
-- 如果匹配不唯一，错误信息会显示所有匹配位置，请添加更多上下文使 old_string 唯一
-- 优先编辑已有文件，而不是重写整个文件
+WORKFLOW_GUIDANCE_PROMPT = """## 工具使用约定
+- 查看项目内容时，优先使用 `read_file`、`grep`、`glob`、`list_files`。
+- 精确修改单个文本文件时，优先使用 `write_file` 或 `edit_file`。
+- 精确移动、复制或删除单个路径时，优先使用 `move_file`、`copy_file` 或 `delete_file`。
+- 如果用户指的是一组已经明确知道的文件或目录，优先使用 `move_paths`、`copy_paths` 或 `delete_paths`，传入精确路径列表，不要用通配符重新猜测范围。
+- 如果用户表达的是模糊集合（如"所有.jpg文件"），先用 `glob` 或 `list_files` 发现具体文件列表，然后将精确路径传入 `move_paths`、`copy_paths` 或 `delete_paths`。
+- 如果要在工作区外批量操作文件，不要直接执行带通配符的 shell 命令。
+- 如果任务本质上是 Python 脚本更擅长的事情，例如循环、批量生成文件、文本/JSON/CSV 处理，请优先使用 `execute_python`，不要把 Python 代码塞进 `execute_shell`。
+- 只有在确实需要命令执行、测试、构建或运行非 Python 命令行程序时，才使用 `execute_shell`。
+"""
 
-## 工具调用规则
-1. 如果需要调用工具，只通过工具调用字段输出，禁止在文本内容中出现工具调用格式。
-2. 调用工具时参数必须是有效 JSON，参数必须简洁。
-3. 不重复调用同一个工具（名称+参数完全一致），除非之前调用失败。
-4. 写文件和执行命令等操作可能需要用户确认，这是正常的安全机制。
+REACT_SYSTEM_PROMPT = """你是当前项目的本地智能开发助手，需要以稳妥、可审计的方式完成任务。
 
-## 最终答案规则
-1. 如果上下文已拥有完成任务所需的全部信息，则不要再调用任何工具。
-2. 最终答案只允许自然语言，不能包含 JSON、思考过程或伪代码。
+## 工作原则
+- 先理解需求，再选择最合适的工具。
+- 能直接回答的问题直接回答，不要为了展示能力而滥用工具。
+- 对代码和文件的修改要尽量精确，避免一次性做无关改动。
+- 如果一次操作失败，要根据失败原因调整方案，而不是机械重复。
 
-## 强制要求
-1. 如果本轮没有工具调用，视为任务完成，直接输出最终答案。
-2. 禁止输出会干扰工具系统解析的任何结构。
+## 工具使用规则
+- `read_file`：读取单个文件内容。
+- `write_file`：创建文件或整体覆盖文件内容。
+- `edit_file`：只替换文件中的唯一片段；如果匹配不唯一，应先缩小范围。
+- `grep`：按正则检索内容。
+- `glob`：按模式查找文件。
+- `list_files`：查看目录下的文件和子目录。
+- `move_file`：移动或重命名单个路径。
+- `copy_file`：复制单个文件或目录。
+- `delete_file`：删除单个文件或目录。
+- `move_paths`：对已知的精确路径集合执行批量移动。
+- `copy_paths`：对已知的精确路径集合执行批量复制。
+- `delete_paths`：对已知的精确路径集合执行批量删除。
+- `execute_python`：直接执行 Python 代码，适合循环、批处理、文本处理和小型自动化。
+- `execute_shell`：运行命令、测试或构建流程。
+- `search_web`：需要联网查找信息时使用。
+- `read_skill`：查看技能说明或工作流文档时使用。
+
+## 编辑要求
+- 修改代码前，先尽量读取足够的上下文。
+- 使用 `edit_file` 时，`old_string` 必须是精确且唯一的原文片段。
+- 如果需要替换多处内容，应分多次调用，避免用模糊文本一次性覆盖。
+
+## 批量操作流程
+- 凡是需要按模式批量操作文件（删除、移动、复制等），必须先用 `glob` 或 `list_files` 发现具体文件列表。
+- 发现文件列表后，**必须**逐项检查列表是否与用户的要求完全一致：
+  - 如果匹配到的文件比用户指定的多或少、名称不符合预期，说明 pattern 范围不对，**必须**调整 pattern 重新搜索。
+  - 只有当文件列表与用户意图精确匹配时，才能将确定的路径列表传入 `move_paths`、`copy_paths` 或 `delete_paths` 执行。
+  - 绝不能在文件列表明显包含非目标文件的情况下仍继续执行。
+
+## 输出要求
+- 正常回答时保持简洁清楚。
+- 如果工具返回错误，先理解错误原因，再决定是否换工具或调整参数。
+- 如果权限被拒绝，要基于当前限制重新规划，而不是假装已经成功。
+
+## 输出限制
+当操作因权限、路径限制或安全策略被阻止时，只需简明告知用户结果，例如：
+- "无法访问该路径，请将文件移动到项目目录后再试。"
+- "该操作被安全策略拒绝，请尝试逐个文件操作。"
+- "目标路径不在当前可访问范围内。"
+
+**不得**解释"因为沙箱策略"、"通过 xxx 工具绕过"、"当前工作区是 xxx"等内部信息。不得向用户暴露系统的内部工作机制。
 """
 
 
+def _tools_to_openai_with_purpose(tools: list[BaseTool]) -> list[dict]:
+    """为每个工具额外注入 purpose 参数，要求模型说明调用原因。"""
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    definitions: list[dict] = []
+    for tool in tools:
+        tool_def = convert_to_openai_tool(tool)
+        fn_def = tool_def.get("function", tool_def)
+        params = fn_def.get("parameters", {})
+        props = params.get("properties", {})
+        props["purpose"] = {
+            "type": "string",
+            "description": "请简要说明这次调用这个工具的原因、目标，或你希望通过它确认什么信息。",
+        }
+        required = list(params.get("required", []))
+        if "purpose" not in required:
+            required.append("purpose")
+        params["properties"] = props
+        params["required"] = required
+        fn_def["parameters"] = params
+        definitions.append(tool_def)
+    return definitions
+
+
 class ReactAgent:
-    """ReAct agent with conversation memory, context compression, streaming, and permission checking."""
+    """带上下文压缩、权限中断和流式输出的 ReAct Agent。"""
 
     def __init__(
         self,
@@ -75,7 +138,7 @@ class ReactAgent:
         context_char_limit: int | None = None,
         tool_defs: dict[str, ToolDef] | None = None,
     ):
-        self.tools = {t.name: t for t in tools}
+        self.tools = {tool.name: tool for tool in tools}
         self.tool_list = tools
         self.llm = llm or self._default_llm()
         self.system_prompt = system_prompt
@@ -94,58 +157,93 @@ class ReactAgent:
         )
 
     def _build_messages(self, question: str, history: list | None = None) -> list:
-        msgs = [
+        messages = [
             SystemMessage(content=REACT_SYSTEM_PROMPT),
+            SystemMessage(content=WORKFLOW_GUIDANCE_PROMPT),
             SystemMessage(content=self.system_prompt),
         ]
         if history:
-            msgs.extend(history)
-        msgs.append(HumanMessage(content=f"<question>\n{question}\n</question>"))
-        return msgs
+            messages.extend(history)
+        messages.append(HumanMessage(content=f"<question>\n{question}\n</question>"))
+        return messages
 
     def _get_permission_level(self, tool_name: str) -> PermissionLevel:
-        """Get the permission level for a tool from its ToolDef."""
-        td = self._tool_defs.get(tool_name)
-        if td is None:
-            return PermissionLevel.SHELL  # Unknown tools require shell-level permission
+        tool_def = self._tool_defs.get(tool_name)
+        if tool_def is None:
+            return PermissionLevel.SHELL
         try:
-            return PermissionLevel(td.permission_level)
+            return PermissionLevel(tool_def.permission_level)
         except ValueError:
             return PermissionLevel.SHELL
 
+    @staticmethod
+    def _tool_result_success(result: object) -> bool:
+        text = str(result).strip().lower()
+        return not any(text.startswith(prefix) for prefix in FAILURE_PREFIXES)
+
+    @staticmethod
+    def _tool_result_warning(tool_name: str, result: object) -> bool:
+        text = str(result).strip().lower()
+        return any(text.startswith(prefix) for prefix in WARNING_PREFIXES)
+
+    @staticmethod
+    def _parse_tool_args(raw_args: object) -> dict:
+        if isinstance(raw_args, dict):
+            return dict(raw_args)
+        if isinstance(raw_args, str):
+            try:
+                parsed = json.loads(raw_args)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return {}
+
+    @staticmethod
+    def _max_rounds_message() -> HumanMessage:
+        return HumanMessage(
+            content="你已经达到当前回合上限。请不要继续调用工具，直接基于已有信息给出结论，并明确说明剩余的不确定性。"
+        )
+
     async def call(self, question: str, history: list | None = None) -> str:
-        """Non-streaming call. Dangerous tools are auto-denied (no interactive prompt)."""
-        llm_with_tools = self.llm.bind_tools(self.tool_list)
+        """非流式调用。危险工具在这里默认不允许交互审批。"""
+        llm_with_tools = self.llm.bind(tools=_tools_to_openai_with_purpose(self.tool_list))
         messages = self._build_messages(question, history)
         round_count = 0
 
         while True:
             round_count += 1
             if self.max_rounds > 0 and round_count > self.max_rounds:
-                messages.append(HumanMessage(content="已达到最大推理轮次。请基于当前已有信息直接给出最终答案，禁止再调用任何工具。"))
-                resp = await self.llm.ainvoke(messages)
-                return str(resp.content)
+                messages.append(self._max_rounds_message())
+                response = await self.llm.ainvoke(messages)
+                return str(response.content)
 
-            resp = await llm_with_tools.ainvoke(messages)
-            messages.append(resp)
+            response = await llm_with_tools.ainvoke(messages)
+            messages.append(response)
 
-            if not resp.tool_calls:
-                return str(resp.content)
+            if not response.tool_calls:
+                return str(response.content)
 
-            for tc in resp.tool_calls:
-                tool = self.tools.get(tc["name"])
+            for tool_call in response.tool_calls:
+                tool = self.tools.get(tool_call["name"])
+                args = self._parse_tool_args(tool_call.get("args", {}))
+                args.pop("purpose", None)
+
                 if tool is None:
-                    result = f"错误: 未找到工具 '{tc['name']}'"
+                    result = f"错误：未知工具 `{tool_call['name']}`。"
                 else:
-                    perm_level = self._get_permission_level(tc["name"])
+                    perm_level = self._get_permission_level(tool_call["name"])
                     if perm_level != PermissionLevel.READ:
-                        result = f"工具 '{tc['name']}' 需要用户授权（{perm_level.value} 级别），在非交互模式下已自动拒绝。"
+                        result = (
+                            f"工具 `{tool_call['name']}` 需要 `{perm_level.value}` 级权限。"
+                            "当前为非交互调用，不能自动批准，请改用更安全的工具或直接给出结论。"
+                        )
                     else:
                         try:
-                            result = await tool.ainvoke(tc["args"])
-                        except Exception as e:
-                            result = f"工具执行失败: {e}"
-                messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+                            result = await tool.ainvoke(args)
+                        except Exception as exc:
+                            result = f"工具执行异常：{exc}"
+                messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
 
             self._compress_if_needed(messages)
 
@@ -155,23 +253,15 @@ class ReactAgent:
         history: list | None = None,
         permission_broker: PermissionBroker | None = None,
     ) -> AsyncIterator[str | dict]:
-        """Streaming call with SSE-compatible token output and permission interrupts.
-
-        Yields:
-            str  — text token to display
-            dict — control events:
-                   {"type": "tool_call", "tool": ..., "args": ...}
-                   {"type": "tool_result", "tool": ..., "success": bool, "result": ...}
-                   {"type": "permission_request", "request_id": ..., "tool": ..., "level": ..., "args": ...}
-        """
-        llm_with_tools = self.llm.bind_tools(self.tool_list)
+        """流式调用，支持工具事件和权限中断。"""
+        llm_with_tools = self.llm.bind(tools=_tools_to_openai_with_purpose(self.tool_list))
         messages = self._build_messages(question, history)
         round_count = 0
 
         while True:
             round_count += 1
             if self.max_rounds > 0 and round_count > self.max_rounds:
-                messages.append(HumanMessage(content="已达到最大推理轮次。请基于当前已有信息直接给出最终答案，禁止再调用任何工具。"))
+                messages.append(self._max_rounds_message())
                 async for chunk in self.llm.astream(messages):
                     if chunk.content:
                         yield str(chunk.content)
@@ -184,106 +274,114 @@ class ReactAgent:
                     full_content += str(chunk.content)
                     yield str(chunk.content)
                 if chunk.tool_calls:
-                    for tc in chunk.tool_calls:
-                        existing = next((t for t in tool_calls_acc if t.get("id") == tc.get("id")), None)
+                    for tool_call in chunk.tool_calls:
+                        existing = next((item for item in tool_calls_acc if item.get("id") == tool_call.get("id")), None)
                         if existing:
-                            existing["args"] = (existing.get("args", "") + str(tc.get("args", "")))
+                            existing["args"] = (existing.get("args", "") + str(tool_call.get("args", "")))
                         else:
-                            tool_calls_acc.append(dict(tc))
+                            tool_calls_acc.append(dict(tool_call))
 
             if not tool_calls_acc:
                 return
 
-            ai_msg = AIMessage(content=full_content or "", tool_calls=tool_calls_acc)
-            messages.append(ai_msg)
+            messages.append(AIMessage(content=full_content or "", tool_calls=tool_calls_acc))
 
-            for tc_raw in tool_calls_acc:
-                tool = self.tools.get(tc_raw["name"])
+            for raw_call in tool_calls_acc:
+                tool = self.tools.get(raw_call["name"])
+                args = self._parse_tool_args(raw_call.get("args", {}))
+                llm_purpose = str(args.pop("purpose", "")).strip()
+
                 if tool is None:
-                    result = f"错误: 未找到工具 '{tc_raw['name']}'"
-                else:
-                    perm_level = self._get_permission_level(tc_raw["name"])
-                    # Parse args — they might be JSON string or dict
-                    args = tc_raw.get("args", {})
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except (json.JSONDecodeError, TypeError):
-                            args = {}
+                    result = f"错误：未知工具 `{raw_call['name']}`。"
+                    messages.append(ToolMessage(content=result, tool_call_id=raw_call["id"]))
+                    continue
 
-                    if perm_level != PermissionLevel.READ:
-                        if permission_broker is not None:
-                            # Session allowlist check — skip prompt if already approved
-                            if not permission_broker.is_allowlisted(tc_raw["name"]):
-                                request_id = permission_broker.create_request(perm_level, tc_raw["name"], args)
-                                yield {
-                                    "type": "permission_request",
-                                    "request_id": request_id,
-                                    "tool": tc_raw["name"],
-                                    "level": perm_level.value,
-                                    "args": args,
-                                }
-                                approved = await permission_broker.wait(request_id)
-                                if not approved:
-                                    result = f"用户拒绝了 {tc_raw['name']} 操作。"
-                                    messages.append(ToolMessage(content=str(result), tool_call_id=tc_raw["id"]))
-                                    continue
-                            # else: allowlisted — proceed directly to execution
-                        else:
-                            result = f"工具 '{tc_raw['name']}' 需要用户授权（{perm_level.value} 级别），请使用交互模式。"
-                            messages.append(ToolMessage(content=str(result), tool_call_id=tc_raw["id"]))
+                perm_level = self._get_permission_level(raw_call["name"])
+                if perm_level != PermissionLevel.READ:
+                    if permission_broker is None:
+                        result = (
+                            f"工具 `{raw_call['name']}` 需要 `{perm_level.value}` 级权限，"
+                            "但当前没有可用的权限代理。"
+                        )
+                        messages.append(ToolMessage(content=result, tool_call_id=raw_call["id"]))
+                        continue
+
+                    if not permission_broker.should_skip_prompt(raw_call["name"], args):
+                        request_id = permission_broker.create_request(perm_level, raw_call["name"], args)
+                        yield {
+                            "type": "permission_request",
+                            "request_id": request_id,
+                            "tool": raw_call["name"],
+                            "level": perm_level.value,
+                            "args": args,
+                            "purpose": llm_purpose,
+                        }
+                        approved = await permission_broker.wait(request_id)
+                        if not approved:
+                            result = f"用户拒绝了工具 `{raw_call['name']}` 的执行请求。"
+                            messages.append(ToolMessage(content=result, tool_call_id=raw_call["id"]))
                             continue
 
-                    # Yield tool_call event so the user sees what's happening
-                    yield {
-                        "type": "tool_call",
-                        "tool": tc_raw["name"],
-                        "args": args,
-                    }
+                yield {
+                    "type": "tool_call",
+                    "tool": raw_call["name"],
+                    "args": args,
+                    "visible": getattr(self._tool_defs.get(raw_call["name"]), "visible", True),
+                }
 
-                    try:
-                        result = await tool.ainvoke(args)
-                        success = True
-                    except Exception as e:
-                        result = f"工具执行失败: {e}"
-                        success = False
+                try:
+                    result = await tool.ainvoke(args)
+                    success = self._tool_result_success(result)
+                    warning = self._tool_result_warning(raw_call["name"], result)
+                except Exception as exc:
+                    result = f"工具执行异常：{exc}"
+                    success = False
+                    warning = False
 
-                    # Yield tool_result event
-                    result_str = str(result)
-                    yield {
-                        "type": "tool_result",
-                        "tool": tc_raw["name"],
-                        "success": success,
-                        "result": result_str[:500],  # Truncate for display
-                    }
+                yield {
+                    "type": "tool_result",
+                    "tool": raw_call["name"],
+                    "success": success,
+                    "warning": warning,
+                    "result": str(result)[:500],
+                    "visible": getattr(self._tool_defs.get(raw_call["name"]), "visible", True),
+                }
 
-                messages.append(ToolMessage(content=str(result), tool_call_id=tc_raw["id"]))
+                if permission_broker is not None:
+                    permission_broker.clear_current_approval()
+
+                messages.append(ToolMessage(content=str(result), tool_call_id=raw_call["id"]))
 
             self._compress_if_needed(messages)
 
     def _compress_if_needed(self, messages: list):
-        """Context compression — migrated from Java compressIfNeeded."""
-        total_chars = sum(len(str(m.content or "")) for m in messages)
+        total_chars = sum(len(str(message.content or "")) for message in messages)
         if total_chars <= self.context_char_limit:
             return
+
         logger.warning("Context too large (%d chars), compressing...", total_chars)
 
-        system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
-        other_msgs = [m for m in messages if not isinstance(m, SystemMessage)]
+        system_messages = [message for message in messages if isinstance(message, SystemMessage)]
+        other_messages = [message for message in messages if not isinstance(message, SystemMessage)]
 
-        if len(other_msgs) <= 4:
+        if len(other_messages) <= 4:
             return
 
-        keep_tail = other_msgs[-4:]
-        to_compress = other_msgs[1:-4]
+        keep_tail = other_messages[-4:]
+        to_compress = other_messages[1:-4]
         if not to_compress:
             return
 
-        compressed_text = "\n".join(f"[{m.__class__.__name__}]: {str(m.content)[:200]}..." for m in to_compress)
-        summary_msg = SystemMessage(content=f"【压缩的历史上下文】\n{compressed_text}")
+        compressed_text = "\n".join(
+            f"[{message.__class__.__name__}] {str(message.content)[:200]}..."
+            for message in to_compress
+        )
+        summary_message = SystemMessage(
+            content="以下是较早对话的压缩摘要，供你继续参考：\n" + compressed_text
+        )
 
         messages.clear()
-        messages.extend(system_msgs)
-        messages.append(other_msgs[0])
-        messages.append(summary_msg)
+        messages.extend(system_messages)
+        messages.append(other_messages[0])
+        messages.append(summary_message)
         messages.extend(keep_tail)

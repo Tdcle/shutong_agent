@@ -6,6 +6,7 @@ export interface PermissionRequest {
   tool: string
   level: 'read' | 'write' | 'destroy' | 'shell'
   args: Record<string, unknown>
+  purpose: string
 }
 
 const props = defineProps<{
@@ -18,7 +19,7 @@ const emit = defineEmits<{
 }>()
 
 const remember = ref(false)
-const canRemember = computed(() => props.request.level === 'write')
+const canRemember = computed(() => props.request.level === 'write' || props.request.level === 'destroy')
 
 function handleApprove() {
   emit('approve', props.request.request_id, remember.value)
@@ -30,10 +31,10 @@ function handleDeny() {
 
 const levelLabel = computed(() => {
   const map: Record<string, string> = {
-    read: '读取',
-    write: '写入/修改',
-    destroy: '删除',
-    shell: '执行命令',
+    read: '只读',
+    write: '写入',
+    destroy: '删除或移动',
+    shell: '命令执行',
   }
   return map[props.request.level] || props.request.level
 })
@@ -45,8 +46,12 @@ const toolLabel = computed(() => {
     write_file: '写入文件',
     edit_file: '编辑文件',
     move_file: '移动文件',
+    copy_file: '复制文件',
     delete_file: '删除文件',
-    execute_shell: '执行终端命令',
+    move_paths: '批量移动',
+    copy_paths: '批量复制',
+    delete_paths: '批量删除',
+    execute_shell: '执行命令',
   }
   return map[props.request.tool] || props.request.tool
 })
@@ -54,8 +59,8 @@ const toolLabel = computed(() => {
 function formatArgs(args: Record<string, unknown>): string {
   const lines: string[] = []
   for (const [key, value] of Object.entries(args)) {
-    const val = typeof value === 'string' ? value : JSON.stringify(value)
-    lines.push(`${key}: ${val}`)
+    const formatted = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+    lines.push(`${key}: ${formatted}`)
   }
   return lines.join('\n')
 }
@@ -67,19 +72,23 @@ function formatArgs(args: Record<string, unknown>): string {
       <div class="permission-dialog" :class="levelClass">
         <div class="dialog-header">
           <span class="dialog-icon">&#9888;</span>
-          <h3>工具操作确认</h3>
+          <h3>需要你的确认</h3>
         </div>
 
         <div class="dialog-body">
           <div class="info-row">
-            <span class="label">操作</span>
+            <span class="label">工具</span>
             <span class="value">{{ toolLabel }}</span>
           </div>
           <div class="info-row">
-            <span class="label">风险级别</span>
+            <span class="label">权限级别</span>
             <span class="badge" :class="levelClass">{{ levelLabel }}</span>
           </div>
-          <div class="args-box" v-if="request.args && Object.keys(request.args).length > 0">
+          <div v-if="request.purpose" class="purpose-box">
+            <div class="label">本次操作目的</div>
+            <p>{{ request.purpose }}</p>
+          </div>
+          <div v-if="request.args && Object.keys(request.args).length > 0" class="args-box">
             <div class="label">参数</div>
             <pre>{{ formatArgs(request.args) }}</pre>
           </div>
@@ -87,8 +96,8 @@ function formatArgs(args: Record<string, unknown>): string {
 
         <div v-if="canRemember" class="dialog-remember">
           <label>
-            <input type="checkbox" v-model="remember" />
-            <span>本次会话内自动允许同类操作</span>
+            <input v-model="remember" type="checkbox" />
+            <span>记住这类操作，对相同目录范围后续自动放行</span>
           </label>
         </div>
 
@@ -126,16 +135,25 @@ function formatArgs(args: Record<string, unknown>): string {
 .permission-dialog.level-write {
   border-color: var(--warning);
 }
+
 .permission-dialog.level-destroy {
   border-color: var(--danger);
 }
+
 .permission-dialog.level-shell {
   border-color: var(--danger);
 }
 
 @keyframes slideUp {
-  from { opacity: 0; transform: translateY(16px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .dialog-header {
@@ -191,17 +209,41 @@ function formatArgs(args: Record<string, unknown>): string {
   background: #ecfdf5;
   color: var(--success);
 }
+
 .badge.level-write {
   background: #fffbeb;
   color: var(--warning);
 }
+
 .badge.level-destroy {
   background: #fef2f2;
   color: var(--danger);
 }
+
 .badge.level-shell {
   background: #fef2f2;
   color: var(--danger);
+}
+
+.purpose-box {
+  margin-top: 10px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.purpose-box .label {
+  display: block;
+  margin-bottom: 4px;
+  color: #0369a1;
+}
+
+.purpose-box p {
+  margin: 0;
+  font-size: 13px;
+  color: #0c4a6e;
+  line-height: 1.5;
 }
 
 .args-box {
@@ -239,7 +281,7 @@ function formatArgs(args: Record<string, unknown>): string {
   cursor: pointer;
 }
 
-.dialog-remember input[type="checkbox"] {
+.dialog-remember input[type='checkbox'] {
   accent-color: var(--primary);
   width: 15px;
   height: 15px;
@@ -269,6 +311,7 @@ function formatArgs(args: Record<string, unknown>): string {
   color: var(--text-secondary);
   border: 1px solid var(--border);
 }
+
 .btn-deny:hover {
   background: var(--border);
 }
@@ -277,7 +320,8 @@ function formatArgs(args: Record<string, unknown>): string {
   background: var(--primary);
   color: white;
 }
+
 .btn-approve:hover {
-  background: var(--primary-hover);
+  filter: brightness(1.05);
 }
 </style>

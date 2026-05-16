@@ -28,10 +28,13 @@ export interface SSEData {
   // permission_request
   request_id?: string
   level?: string
+  purpose?: string
   // tool_call / tool_result
   tool?: string
   args?: Record<string, unknown>
+  visible?: boolean
   success?: boolean
+  warning?: boolean
   result?: string
 }
 

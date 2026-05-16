@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_agent_service, register_broker, unregister_broker, get_broker
 from app.models.database import async_session_factory
 from app.models.session import Message, Session
-from app.tools.permissions import PermissionBroker
+from app.tools.permissions import PermissionBroker, set_current_permission_broker
 from app.tools.workspace import create_session_workspace, set_session_workspace
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,7 @@ async def chat_stream(req: ChatRequest):
 
     async def event_generator():
         set_session_workspace(workspace_path)
+        set_current_permission_broker(permission_broker)
         collected_content = ""
         try:
             async for event in agent_service.stream_chat(
@@ -116,6 +117,8 @@ async def chat_stream(req: ChatRequest):
         except Exception as e:
             logger.exception("Chat stream error")
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+        finally:
+            set_current_permission_broker(None)
 
     return StreamingResponse(
         event_generator(),
@@ -159,28 +162,32 @@ async def chat_send(req: ChatRequest) -> ChatResponse:
     if not marker.exists():
         marker.write_text(session_id)
     set_session_workspace(workspace_path)
+    set_current_permission_broker(None)
 
-    async with async_session_factory() as db:
-        db.add(Message(session_id=session_id, role="user", content=req.message))
-        await db.commit()
+    try:
+        async with async_session_factory() as db:
+            db.add(Message(session_id=session_id, role="user", content=req.message))
+            await db.commit()
 
-    async with async_session_factory() as db:
-        result = await db.execute(
-            select(Message).where(Message.session_id == session_id).order_by(Message.created_at)
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(Message).where(Message.session_id == session_id).order_by(Message.created_at)
+            )
+            history = result.scalars().all()
+
+        answer = await agent_service.send_chat(
+            question=req.message,
+            session_id=session_id,
+            agent_type=req.agent_type,
+            history=history,
         )
-        history = result.scalars().all()
 
-    answer = await agent_service.send_chat(
-        question=req.message,
-        session_id=session_id,
-        agent_type=req.agent_type,
-        history=history,
-    )
+        async with async_session_factory() as db:
+            db.add(Message(session_id=session_id, role="assistant", content=answer))
+            await db.commit()
 
-    async with async_session_factory() as db:
-        db.add(Message(session_id=session_id, role="assistant", content=answer))
-        await db.commit()
+        await agent_service.finalize_turn(session_id, req.message, answer)
 
-    await agent_service.finalize_turn(session_id, req.message, answer)
-
-    return ChatResponse(session_id=session_id, message=answer)
+        return ChatResponse(session_id=session_id, message=answer)
+    finally:
+        pass

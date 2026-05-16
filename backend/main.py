@@ -191,6 +191,8 @@ async def run_cli():
                 await agent_service.finalize_turn(session_id, question, answer)
             except Exception as e:
                 print(f"\n[Error] {e}")
+            finally:
+                pass
     finally:
         get_sandbox_manager().destroy_for_session(workspace_path)
         shutil.rmtree(workspace_path, ignore_errors=True)
