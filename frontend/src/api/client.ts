@@ -35,6 +35,10 @@ export interface SSEData {
   type: string
   content?: string
   session_id?: string
+  // agent_info
+  agent_type?: string
+  agent_display_name?: string
+  agent_icon?: string
   // permission_request
   request_id?: string
   level?: string
@@ -51,6 +55,8 @@ export interface SSEData {
 export function streamChat(
   sessionId: string,
   message: string,
+  agentType: string = 'auto',
+  images: string[] = [],
   onChunk: (data: SSEData) => void,
   onError: (err: Error) => void,
   onDone: () => void
@@ -60,7 +66,7 @@ export function streamChat(
   fetch(`${BASE_URL}/api/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, message }),
+    body: JSON.stringify({ session_id: sessionId, message, agent_type: agentType, images }),
     signal: controller.signal,
   })
     .then(async (res) => {
@@ -97,4 +103,23 @@ export function streamChat(
     })
 
   return controller
+}
+
+export async function uploadImage(
+  file: File,
+  sessionId: string
+): Promise<{ filename: string; path: string; session_id: string }> {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('session_id', sessionId)
+
+  const res = await fetch(`${BASE_URL}/api/chat/upload`, {
+    method: 'POST',
+    body: formData,
+  })
+  if (!res.ok) {
+    const detail = await res.text()
+    throw new Error(`Upload failed: ${res.status} ${detail}`)
+  }
+  return res.json()
 }

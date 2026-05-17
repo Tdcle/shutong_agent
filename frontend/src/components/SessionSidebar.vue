@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import type { Session } from '../types'
 import { useSessions } from '../composables/useSessions'
+import { useChat } from '../composables/useChat'
 
 const props = defineProps<{
   sessions: Session[]
@@ -15,6 +16,7 @@ const emit = defineEmits<{
 }>()
 
 const { deleteSession } = useSessions()
+const { onSessionDestroyed } = useChat()
 
 // Track which session is awaiting delete confirmation
 const pendingDeleteId = ref<string | null>(null)
@@ -26,6 +28,7 @@ function requestDelete(id: string) {
 
 function confirmDelete(id: string) {
   pendingDeleteId.value = null
+  onSessionDestroyed(id)
   deleteSession(id)
 }
 </script>

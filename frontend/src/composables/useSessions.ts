@@ -23,10 +23,24 @@ export function useSessions() {
     }
   }
 
-  async function createSession(_firstMessage?: string): Promise<string> {
-    // Sessions are created on first chat message, so we just start with empty id
-    currentSessionId.value = ''
-    return ''
+  async function startNewChat(): Promise<string> {
+    // Check if an empty session already exists
+    const emptySession = sessions.value.find((s) => s.message_count === 0)
+    if (emptySession) {
+      currentSessionId.value = emptySession.id
+      return emptySession.id
+    }
+    // Create a new session
+    try {
+      const data = await apiPost<{ id: string; title: string }>('/api/sessions', {})
+      await loadSessions()
+      currentSessionId.value = data.id
+      return data.id
+    } catch (e) {
+      console.error('Failed to create session:', e)
+      currentSessionId.value = ''
+      return ''
+    }
   }
 
   function selectSession(id: string) {
@@ -57,7 +71,7 @@ export function useSessions() {
     currentSession,
     loading,
     loadSessions,
-    createSession,
+    startNewChat,
     selectSession,
     deleteSession,
     updateSessionTitle,

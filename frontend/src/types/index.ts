@@ -22,13 +22,24 @@ export interface ToolCall {
 }
 
 export interface SSEChunk {
-  type: 'text' | 'thinking' | 'error' | 'done'
+  type: 'text' | 'thinking' | 'error' | 'done' | 'agent_info'
   content?: string
   session_id?: string
+  agent_type?: string
+  agent_display_name?: string
+  agent_icon?: string
 }
 
 export interface ChatRequest {
   session_id: string
   message: string
-  agent_type: 'react' | 'plan_execute' | 'reflection'
+  agent_type: string  // "auto" | "react" | "plan_execute" | "reflection" | ...
+}
+
+export interface AgentInfo {
+  name: string
+  display_name: string
+  description: string
+  icon: string
+  keywords: string[]
 }

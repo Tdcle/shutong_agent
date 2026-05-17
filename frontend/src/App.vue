@@ -1,13 +1,33 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, watch } from 'vue'
 import SessionSidebar from './components/SessionSidebar.vue'
 import ChatArea from './components/ChatArea.vue'
 import UserSettings from './components/UserSettings.vue'
 import { useSessions } from './composables/useSessions'
 
-const { loadSessions, currentSessionId, setCurrentId, sessions } = useSessions()
+const { loadSessions, currentSessionId, setCurrentId, sessions, startNewChat } = useSessions()
+
+function restoreSessionFromHash() {
+  const hash = window.location.hash.slice(1)
+  if (hash) {
+    setCurrentId(hash)
+  }
+}
+
+function saveSessionToHash(id: string) {
+  if (id) {
+    window.location.hash = '#' + id
+  } else {
+    history.replaceState(null, '', window.location.pathname + window.location.search)
+  }
+}
+
+watch(currentSessionId, (id) => {
+  saveSessionToHash(id)
+})
 
 onMounted(() => {
+  restoreSessionFromHash()
   loadSessions()
 })
 </script>
@@ -18,7 +38,7 @@ onMounted(() => {
       :sessions="sessions"
       :current-session-id="currentSessionId"
       @select="setCurrentId"
-      @new-chat="setCurrentId('')"
+      @new-chat="startNewChat"
       @refresh="loadSessions"
     />
     <main class="main-area">
