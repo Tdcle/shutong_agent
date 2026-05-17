@@ -89,10 +89,10 @@ async def test_shell_sandbox():
     set_session_workspace(ws)
     mgr = get_sandbox_manager()
 
-    from app.tools.shell import execute_shell
+    from app.tools.shell import execute_bash
     from app.tools.file_ops import list_files
 
-    result = await execute_shell('echo "line1" > out.txt && echo "line2" >> out.txt', ".")
+    result = await execute_bash('echo "line1" > out.txt && echo "line2" >> out.txt', ".")
     assert "out.txt" in result
     ok("Shell output shows file changes")
 
@@ -169,11 +169,11 @@ async def test_session_cleanup():
     mgr = get_sandbox_manager()
 
     from app.tools.file_ops import write_file, edit_file
-    from app.tools.shell import execute_shell
+    from app.tools.shell import execute_bash
 
     write_file("code.py", "x = 1\n")
     edit_file("code.py", "1", "42")
-    await execute_shell("python -c 'print(42)'", ".")
+    await execute_bash("python -c 'print(42)'", ".")
 
     sandbox_dir = ws / SANDBOX_DIRNAME
     assert sandbox_dir.exists()
@@ -216,13 +216,13 @@ async def test_shell_timeout():
     set_session_workspace(ws)
     mgr = get_sandbox_manager()
 
-    from app.tools.shell import execute_shell
+    from app.tools.shell import execute_bash
 
     old_timeout = settings.shell_timeout_seconds
     settings.shell_timeout_seconds = 1
     try:
         start = time.time()
-        result = await execute_shell("python -c \"import time; time.sleep(2)\"")
+        result = await execute_bash("python -c \"import time; time.sleep(2)\"")
         elapsed = time.time() - start
     finally:
         settings.shell_timeout_seconds = old_timeout
@@ -241,9 +241,9 @@ async def test_shell_network_block():
     set_session_workspace(ws)
     mgr = get_sandbox_manager()
 
-    from app.tools.shell import execute_shell
+    from app.tools.shell import execute_bash
 
-    result = await execute_shell("curl https://example.com")
+    result = await execute_bash("curl https://example.com")
     assert "blocked by sandbox policy" in result.lower()
     ok("Network-style command blocked")
 
@@ -257,9 +257,9 @@ async def test_shell_external_batch_block():
     set_session_workspace(ws)
     mgr = get_sandbox_manager()
 
-    from app.tools.shell import execute_shell
+    from app.tools.shell import execute_bash
 
-    result = await execute_shell(r'del C:\Users\26422\Desktop\*.txt')
+    result = await execute_bash(r'del C:\Users\26422\Desktop\*.txt')
     assert "delete_paths" in result
     ok("External wildcard delete blocked with structured guidance")
 
@@ -273,9 +273,9 @@ async def test_nested_shell_block():
     set_session_workspace(ws)
     mgr = get_sandbox_manager()
 
-    from app.tools.shell import execute_shell
+    from app.tools.shell import execute_bash
 
-    result = await execute_shell("powershell -Command Get-ChildItem")
+    result = await execute_bash("powershell -Command Get-ChildItem")
     assert "nested shell launch" in result.lower()
     ok("Nested shell launch blocked")
 
@@ -289,9 +289,9 @@ async def test_command_length_block():
     set_session_workspace(ws)
     mgr = get_sandbox_manager()
 
-    from app.tools.shell import execute_shell
+    from app.tools.shell import execute_bash
 
-    result = await execute_shell("echo " + ("x" * 2500))
+    result = await execute_bash("echo " + ("x" * 2500))
     assert "too long" in result.lower()
     ok("Overlong command blocked")
 
@@ -344,9 +344,9 @@ async def test_shell_disallowed_token_matching_is_not_overbroad():
     set_session_workspace(ws)
     mgr = get_sandbox_manager()
 
-    from app.tools.shell import execute_shell
+    from app.tools.shell import execute_bash
 
-    result = await execute_shell('for ($i=1; $i -le 2; $i++) { "$i" | Out-File -Encoding utf8 -FilePath "$i.txt" }')
+    result = await execute_bash('for ($i=1; $i -le 2; $i++) { "$i" | Out-File -Encoding utf8 -FilePath "$i.txt" }')
     assert "contains disallowed token 'at'" not in result.lower()
     ok("Safe commands containing path/filepath text are not blocked by short token matches")
 
@@ -360,10 +360,10 @@ async def test_shell_nonzero_exit_is_reported_as_failure():
     set_session_workspace(ws)
     mgr = get_sandbox_manager()
 
-    from app.tools.shell import execute_shell
+    from app.tools.shell import execute_bash
 
-    result = await execute_shell('python -c "import sys; sys.exit(3)"')
-    assert result.lower().startswith("command execution failed:")
+    result = await execute_bash('python -c "import sys; sys.exit(3)"')
+    assert result.lower().startswith("bash execution failed:")
     assert "exit code: 3" in result.lower()
     ok("Nonzero shell exit is returned as a failure summary")
 

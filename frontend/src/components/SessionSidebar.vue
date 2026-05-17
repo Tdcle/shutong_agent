@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import type { Session } from '../types'
 import { useSessions } from '../composables/useSessions'
 
@@ -14,6 +15,19 @@ const emit = defineEmits<{
 }>()
 
 const { deleteSession } = useSessions()
+
+// Track which session is awaiting delete confirmation
+const pendingDeleteId = ref<string | null>(null)
+
+function requestDelete(id: string) {
+  // Toggle: clicking again cancels
+  pendingDeleteId.value = pendingDeleteId.value === id ? null : id
+}
+
+function confirmDelete(id: string) {
+  pendingDeleteId.value = null
+  deleteSession(id)
+}
 </script>
 
 <template>
@@ -35,11 +49,22 @@ const { deleteSession } = useSessions()
         <div class="session-meta">
           <span>{{ s.message_count }} 条消息</span>
           <button
-            class="btn-delete"
-            @click.stop="deleteSession(s.id); emit('refresh')"
+            v-if="pendingDeleteId !== s.id"
+            class="btn-delete-icon"
+            @click.stop="requestDelete(s.id)"
             title="删除会话"
           >
-            x
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+          </button>
+          <button
+            v-else
+            class="btn-confirm-delete"
+            @click.stop="confirmDelete(s.id)"
+          >
+            确认删除
           </button>
         </div>
       </div>
@@ -140,20 +165,38 @@ const { deleteSession } = useSessions()
   color: var(--text-muted);
 }
 
-.btn-delete {
+.btn-delete-icon {
   background: none;
   border: none;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 14px;
   padding: 2px 6px;
   border-radius: 4px;
   transition: all 0.15s;
+  display: flex;
+  align-items: center;
 }
 
-.btn-delete:hover {
+.btn-delete-icon:hover {
   color: var(--danger);
   background: #fef2f2;
+}
+
+.btn-confirm-delete {
+  background: var(--danger);
+  color: white;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 4px;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.btn-confirm-delete:hover {
+  background: #dc2626;
 }
 
 .empty-hint {

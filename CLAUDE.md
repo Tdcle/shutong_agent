@@ -92,11 +92,11 @@ npm run build                     # 生产构建
 
 | 级别 | 工具 |
 |------|------|
-| read | read_file, grep, glob, list_files, search_web, read_skill |
+| read | read_file, grep, glob, list_files, search_web, read_skill, analyze_image |
 | write | write_file, edit_file, move_file, copy_file, move_paths, copy_paths |
 | destroy | delete_file, delete_paths |
-| shell | execute_shell, execute_python |
-| shell | execute_shell, execute_python |
+| shell | execute_bash, execute_python |
+| shell | execute_bash, execute_python |
 
 ### 目录约定
 

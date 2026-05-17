@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 from app.api.chat import router as chat_router
 from app.api.session import router as session_router
 from app.api.memory_api import router as memory_router
+from app.api.config_api import router as config_router, apply_user_config
 from app.api.skills_api import router as skills_router
 from app.models.database import init_db
 from app.config import settings
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
     try:
         await init_db()
         print(f"[OK] Database initialized")
+        apply_user_config()
     except Exception as e:
         print(f"[WARN] Database init failed (retry on first request): {e}")
 
@@ -89,6 +91,7 @@ app.include_router(chat_router)
 app.include_router(session_router)
 app.include_router(memory_router)
 app.include_router(skills_router)
+app.include_router(config_router)
 
 
 @app.get("/api/health")

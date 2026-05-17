@@ -166,7 +166,7 @@ links:
 
 对话进行中（agent 自行决定）：
   ⑤ 发现任务与某记忆相关 → 调用 read_file 读取对应文件
-  ⑥ 需要更多信息 → 调用 execute_shell grep 搜索 feedback/ 或 project/
+  ⑥ 需要更多信息 → 调用 execute_bash grep 搜索 feedback/ 或 project/
   ⑦ 需要历史对话 → 通过 API 搜索 sessions 表
 
 对话结束后（自动）：

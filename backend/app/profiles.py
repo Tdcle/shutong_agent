@@ -24,6 +24,8 @@ class Profile:
     llm_compress_model: str = "qwen-flash"
     llm_compress_temperature: float = 0.1
 
+    vision_model: str = "qwen-vl-plus"
+
     search_backend: str = "bocha"
 
 
@@ -36,6 +38,8 @@ class DevProfile(Profile):
     llm_base_url: str = "http://localhost:11434/v1"
 
     llm_compress_model: str = "qwen3:8b"
+
+    vision_model: str = ""
 
     search_backend: str = "ddgs"
 

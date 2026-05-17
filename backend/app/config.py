@@ -99,7 +99,8 @@ class Settings(BaseSettings):
         "powershell -EncodedCommand,pwsh -EncodedCommand,certutil -urlcache,"
         "bitsadmin,regsvr32,rundll32,mshta,wscript,cscript,wmic,netsh,"
         "schtasks,at,shutdown,restart-computer,stop-computer,taskkill,"
-        "takeown,icacls,mklink,subst,format,mountvol"
+        "takeown,icacls,mklink,subst,format,mountvol,"
+        "pip,pip3,conda"
     )
 
 

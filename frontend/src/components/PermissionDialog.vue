@@ -51,7 +51,7 @@ const toolLabel = computed(() => {
     move_paths: '批量移动',
     copy_paths: '批量复制',
     delete_paths: '批量删除',
-    execute_shell: '执行命令',
+    execute_bash: '执行命令',
   }
   return map[props.request.tool] || props.request.tool
 })

@@ -358,7 +358,7 @@ ToolRouter 不能只看工具名，还要看参数。
 | `read_file` / `grep` / `search` | `host_readonly` | 否 | 无 |
 | `write_file` / `edit_file` | `sandbox_edit` | 视策略而定 | `patch` |
 | `delete_file` / `move_file` | `sandbox_edit` | 是 | `patch` + 删除清单 |
-| `execute_shell` | `sandbox_exec` | 是 | `patch/artifact` |
+| `execute_bash` | `sandbox_exec` | 是 | `patch/artifact` |
 | `run_tests` / `build` | `sandbox_exec` | 是 | `patch/artifact` |
 | 生成图片/文档/报告 | `sandbox_edit` 或 `sandbox_exec` | 视策略而定 | `artifact` |
 

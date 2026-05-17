@@ -175,6 +175,45 @@ def read_file(path: str, encoding: str = "utf-8", offset: int = 0, limit: int = 
             content = raw[:MAX_READ_SIZE] + f"\n\n... (truncated, total {total_chars} characters, {total_lines} lines) ..."
             return content
         return raw
+    except UnicodeDecodeError:
+        ext = p.suffix.lower()
+        size = p.stat().st_size
+
+        KNOWN_BINARY = {
+            '.xlsx': 'Microsoft Excel (.xlsx)', '.xls': 'Microsoft Excel (.xls)',
+            '.pdf': 'PDF Document', '.docx': 'Word Document (.docx)',
+            '.doc': 'Word Document (.doc)', '.pptx': 'PowerPoint (.pptx)',
+            '.png': 'PNG Image', '.jpg': 'JPEG Image', '.jpeg': 'JPEG Image',
+            '.gif': 'GIF Image', '.bmp': 'Bitmap Image', '.webp': 'WebP Image',
+            '.zip': 'ZIP Archive', '.7z': '7-Zip Archive', '.rar': 'RAR Archive',
+            '.db': 'SQLite Database', '.sqlite': 'SQLite Database',
+            '.pyc': 'Python Bytecode', '.pyd': 'Python Extension',
+            '.dll': 'Dynamic Link Library', '.exe': 'Executable',
+            '.so': 'Shared Object', '.pkl': 'Pickle File',
+        }
+        TEXT_EXTENSIONS = {
+            '.csv', '.tsv', '.txt', '.md', '.json', '.xml', '.yaml', '.yml',
+            '.toml', '.ini', '.cfg', '.log', '.html', '.css', '.js', '.ts',
+            '.py', '.java', '.go', '.rs', '.c', '.cpp', '.h', '.sh', '.bat',
+            '.ps1', '.sql', '.r', '.rb', '.php', '.swift', '.kt', '.scala',
+        }
+
+        if ext in TEXT_EXTENSIONS:
+            type_desc = f"Text file ({ext}), but not valid UTF-8. Try encoding='gbk'."
+        elif ext in KNOWN_BINARY:
+            type_desc = KNOWN_BINARY[ext]
+        else:
+            import mimetypes
+            mime_type, _ = mimetypes.guess_type(str(p))
+            type_desc = mime_type or f"Binary file ({ext or 'no extension'})"
+
+        return (
+            f"[Binary file] {p.name}\n"
+            f"Type: {type_desc}\n"
+            f"Size: {size:,} bytes\n"
+            f"Tip: This file cannot be read as text. Use copy_file to stage it into the "
+            f"workspace, then process with execute_python."
+        )
     except Exception as exc:
         return f"Read failed: {exc}"
 

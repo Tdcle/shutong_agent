@@ -78,8 +78,9 @@ class AgentService:
             read_file,
             write_file,
         )
+        from app.tools.image_ops import analyze_image
         from app.tools.search import search_web
-        from app.tools.shell import execute_python, execute_shell
+        from app.tools.shell import execute_python, execute_bash
 
         self.tool_registry = ToolRegistry()
 
@@ -107,8 +108,9 @@ class AgentService:
         ]:
             register(fn)
 
+        register(analyze_image)
         register(search_web)
-        register(execute_shell)
+        register(execute_bash)
         register(execute_python)
 
         skill_tool = self.skill_registry.create_read_skill_tool()

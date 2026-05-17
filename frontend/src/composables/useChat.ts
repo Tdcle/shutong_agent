@@ -41,7 +41,7 @@ const TOOL_LABELS: Record<string, string> = {
   delete_paths: '批量删除',
   search_web: '联网搜索',
   execute_python: '执行 Python',
-  execute_shell: '执行命令',
+  execute_bash: '执行命令',
   read_skill: '读取技能说明',
 }
 

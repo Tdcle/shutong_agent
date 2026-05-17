@@ -2,6 +2,7 @@
 import { onMounted } from 'vue'
 import SessionSidebar from './components/SessionSidebar.vue'
 import ChatArea from './components/ChatArea.vue'
+import UserSettings from './components/UserSettings.vue'
 import { useSessions } from './composables/useSessions'
 
 const { loadSessions, currentSessionId, setCurrentId, sessions } = useSessions()
@@ -26,6 +27,7 @@ onMounted(() => {
         @session-created="(id: string) => { setCurrentId(id); loadSessions() }"
       />
     </main>
+    <UserSettings />
   </div>
 </template>
 

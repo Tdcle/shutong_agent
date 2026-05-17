@@ -96,11 +96,12 @@ import builtins as __agent_b
 
 # ---- Block dangerous module imports (via sys.meta_path) ----
 _AGENT_BLOCKED_MODULES = frozenset({
-    "subprocess", "socket", "ctypes", "multiprocessing", "threading",
-    "signal", "shlex", "requests", "urllib.request", "urllib3", "httpx",
+    # Network — prevent data exfiltration
+    "socket", "requests", "urllib.request", "urllib3", "httpx",
     "aiohttp", "http.client", "http.server", "ftplib", "smtplib",
-    "telnetlib", "poplib", "pickle", "shelve", "marshal",
-    "importlib", "pkgutil", "pdb", "code",
+    "telnetlib", "poplib",
+    # Dynamic code — prevent code injection
+    "pdb", "code",
 })
 
 class __agent_ImportBlocker(__agent_abc.MetaPathFinder):
@@ -124,6 +125,28 @@ __agent_b.__import__ = __agent_make_safe_import(_AGENT_BLOCKED_MODULES, __agent_
 
 del __agent_sys, __agent_abc, __agent_b, __agent_ImportBlocker
 del __agent_make_safe_import, _AGENT_BLOCKED_MODULES
+
+# ---- Neuter dangerous functions in otherwise-importable modules ----
+def __agent_blocked_call(*_a, **_kw):
+    raise RuntimeError("This function is blocked for security reasons")
+
+try:
+    import subprocess as __agent_sp
+    for __agent_fn in ("run", "call", "check_call", "check_output", "Popen"):
+        setattr(__agent_sp, __agent_fn, __agent_blocked_call)
+    del __agent_sp
+except ImportError:
+    pass
+
+try:
+    import shlex as __agent_sl
+    for __agent_fn in ("split",):
+        setattr(__agent_sl, __agent_fn, __agent_blocked_call)
+    del __agent_sl
+except ImportError:
+    pass
+
+del __agent_blocked_call
 # === END SECURITY PREAMBLE ===
 '''
 
@@ -632,7 +655,14 @@ class SessionSandboxManager:
             current = current.parent
 
     def _resolve_output_working_dir(self, state: SandboxState, working_dir: str) -> Path:
-        host_wd = ensure_within_workspace(working_dir)
+        try:
+            host_wd = ensure_within_workspace(working_dir)
+        except ValueError as e:
+            raise ValueError(
+                f"{e}\n"
+                "Tip: To process files outside the workspace, first use copy_file to stage "
+                "them into the workspace, then use execute_python/execute_bash on the copy."
+            ) from e
         rel = rel_to_workspace(host_wd)
         return state.output_workspace / rel
 
@@ -755,7 +785,22 @@ class SessionSandboxManager:
         )
 
     def _run_windows_command(self, command: str, cwd: Path, env: dict, timeout: int) -> tuple[str, str, int]:
-        command_line = f'"{env.get("COMSPEC") or os.environ.get("COMSPEC") or "C:\\Windows\\System32\\cmd.exe"}" /d /s /c "{command}"'
+        # Use Git Bash on Windows — bash syntax is what LLMs are trained on
+        bash_candidates = [
+            "C:\\Program Files\\Git\\bin\\bash.exe",
+            "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+        ]
+        bash_exe = None
+        for candidate in bash_candidates:
+            if Path(candidate).exists():
+                bash_exe = candidate
+                break
+        if bash_exe is None:
+            # Fallback: try PATH
+            bash_exe = "bash.exe"
+        # Escape double quotes and backslashes for bash -c
+        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+        command_line = f'"{bash_exe}" -c "{escaped}"'
         return self._run_windows_process(command_line, cwd, env, timeout)
 
     def _run_windows_program(
@@ -889,8 +934,8 @@ class SessionSandboxManager:
                 "cmd /k",
                 "powershell",
                 "pwsh",
-                "bash",
                 "sh ",
+                "zsh",
                 "start-process",
             ]
             command_lower = command.lower()
