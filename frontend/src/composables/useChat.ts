@@ -1,18 +1,13 @@
 import { ref } from 'vue'
+import type { Attachment } from '../types'
 import { apiGet, apiPost, streamChat } from '../api/client'
-import { uploadImage } from '../api/client'
-
-export interface SentImage {
-  filename: string
-  path: string
-  previewUrl: string
-}
+import { uploadFile } from '../api/client'
 
 interface UIMessage {
   role: 'user' | 'assistant'
   content: string
   isStreaming: boolean
-  images?: SentImage[]
+  images?: Attachment[]
   toolCalls?: ToolCallEntry[]
 }
 
@@ -35,11 +30,12 @@ export interface PermissionRequest {
   purpose: string
 }
 
-export interface UploadedImage {
+export interface UploadedFile {
   file: File
   filename: string
   path: string
   previewUrl: string
+  type: 'image' | 'document' | 'text'
   uploading: boolean
   error?: string
 }
@@ -85,7 +81,9 @@ const abortControllerRef = ref<AbortController | null>(null)
 const pendingPermission = ref<PermissionRequest | null>(null)
 const toolCalls = ref<ToolCallEntry[]>([])
 const resolvedAgent = ref<{ name: string; displayName: string; icon: string } | null>(null)
-const uploadedImages = ref<UploadedImage[]>([])
+const uploadedFiles = ref<UploadedFile[]>([])
+const deepAnalysis = ref(false)
+const subProgress = ref<string[]>([])
 let _currentSid = ''
 let toolSeq = 0
 
@@ -96,7 +94,7 @@ export function useChat() {
         ...m,
         toolCalls: m.toolCalls ? [...m.toolCalls] : undefined,
         images: m.images ? [...m.images] : undefined,
-        isStreaming: false, // never cache streaming state
+        isStreaming: false,
       })))
     }
   }
@@ -115,7 +113,7 @@ export function useChat() {
   function switchToSession(sid: string) {
     _saveCurrentToCache()
     _currentSid = sid || ''
-    uploadedImages.value = []
+    uploadedFiles.value = []
     resolvedAgent.value = null
     isStreaming.value = false
     pendingPermission.value = null
@@ -130,7 +128,7 @@ export function useChat() {
     _saveCurrentToCache()
   }
 
-  function addUserMessage(content: string, images?: SentImage[]) {
+  function addUserMessage(content: string, images?: Attachment[]) {
     messages.value.push({ role: 'user', content, isStreaming: false, images })
   }
 
@@ -154,16 +152,69 @@ export function useChat() {
   async function loadMessages(sessionId: string) {
     if (!sessionId) return
     try {
-      const data = await apiGet<{ messages: Array<{ role: string; content: string }> }>(`/api/sessions/${sessionId}`)
-      const loaded: UIMessage[] = (data.messages || []).map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content || '',
-        isStreaming: false,
-      }))
+      const data = await apiGet<{
+        messages: Array<{ role: string; content: string; tool_calls?: string | null; images?: string | null }>
+      }>(`/api/sessions/${sessionId}`)
+      const loaded: UIMessage[] = (data.messages || []).map((m) => {
+        const msg: UIMessage = {
+          role: m.role as 'user' | 'assistant',
+          content: m.content || '',
+          isStreaming: false,
+        }
+        if (m.tool_calls && m.role === 'assistant') {
+          try {
+            const parsed: ToolCallEntry[] = JSON.parse(m.tool_calls).map((tc: Record<string, unknown>, i: number) => ({
+              id: `db_tc_${i}`,
+              tool: String(tc.tool || ''),
+              args: (tc.args || {}) as Record<string, unknown>,
+              status: (tc.status === 'done' ? 'done' : 'running') as 'running' | 'done',
+              visible: tc.visible !== false,
+              success: tc.success as boolean | undefined,
+              warning: tc.warning as boolean | undefined,
+              result: tc.result as string | undefined,
+            }))
+            msg.toolCalls = parsed
+          } catch {
+            // Ignore parse errors for malformed tool_calls JSON
+          }
+        }
+        if (m.images && m.role === 'user') {
+          try {
+            const raw = JSON.parse(m.images)
+            msg.images = raw.map((item: Record<string, unknown> | string) => {
+              // Support both old format (array of paths) and new format (array of objects)
+              if (typeof item === 'string') {
+                const filename = item.split(/[/\\]/).pop() || 'file'
+                const ext = filename.split('.').pop()?.toLowerCase() || ''
+                const type = ['png','jpg','jpeg','gif','bmp','webp','tiff','ico'].includes(ext) ? 'image'
+                  : ['pdf','docx','xlsx','xls','pptx'].includes(ext) ? 'document' : 'text'
+                return {
+                  path: item, filename, type: type as Attachment['type'],
+                  previewUrl: `/api/chat/file/${sessionId}/${encodeURIComponent(filename)}`,
+                }
+              }
+              const a = item as Record<string, unknown>
+              const filename = String(a.filename || 'file')
+              return {
+                path: String(a.path || ''),
+                filename,
+                type: (a.type as Attachment['type']) || 'document',
+                previewUrl: (a.type === 'image')
+                  ? `/api/chat/file/${sessionId}/${encodeURIComponent(filename)}`
+                  : '',
+              }
+            })
+          } catch {
+            // Ignore parse errors
+          }
+        }
+        return msg
+      })
       sessionMessageCache.set(sessionId, loaded)
       if (sessionId === _currentSid) {
         messages.value = loaded
-        toolCalls.value = []
+        const lastAssistant = [...loaded].reverse().find((m) => m.role === 'assistant')
+        toolCalls.value = lastAssistant?.toolCalls || []
       }
     } catch (error) {
       console.error('Failed to load session messages:', error)
@@ -179,22 +230,25 @@ export function useChat() {
   }
 
   async function sendMessage(sessionId: string, content: string) {
-    const readyImages = uploadedImages.value.filter((img) => !img.uploading && !img.error)
-    const imagePaths = readyImages.map((img) => img.path)
-    const sentImages: SentImage[] = readyImages.map((img) => ({
-      filename: img.filename, path: img.path, previewUrl: img.previewUrl,
+    const readyFiles = uploadedFiles.value.filter((f) => !f.uploading && !f.error)
+    const imagePaths = readyFiles.map((f) => f.path)
+    const attachments: Attachment[] = readyFiles.map((f) => ({
+      path: f.path, filename: f.filename, type: f.type, previewUrl: f.previewUrl,
     }))
 
-    addUserMessage(content, sentImages.length > 0 ? sentImages : undefined)
-    uploadedImages.value = []
+    addUserMessage(content, attachments.length > 0 ? attachments : undefined)
+    uploadedFiles.value = []
     addAssistantPlaceholder()
     isStreaming.value = true
     pendingPermission.value = null
+    subProgress.value = []
     toolSeq = 0
+    const deepMode = deepAnalysis.value
+    deepAnalysis.value = false
 
     return new Promise<string>((resolve, reject) => {
       const controller = streamChat(
-        sessionId, content, 'auto', imagePaths,
+        sessionId, content, 'auto', imagePaths, deepMode,
         (data) => {
           switch (data.type) {
             case 'text':
@@ -225,6 +279,9 @@ export function useChat() {
             case 'error':
               finishStreaming()
               reject(new Error(data.content || 'Unknown error'))
+              break
+            case 'sub_progress':
+              if (data.content) subProgress.value.push(data.content)
               break
             case 'agent_info':
               resolvedAgent.value = {
@@ -258,55 +315,60 @@ export function useChat() {
   }
 
   function clearMessages() {
-    for (const msg of messages.value) {
-      if (msg.images) for (const img of msg.images) URL.revokeObjectURL(img.previewUrl)
-    }
     messages.value = []
     toolCalls.value = []
-    clearImages()
+    clearFiles()
   }
 
-  async function addImage(file: File) {
-    const previewUrl = URL.createObjectURL(file)
-    const idx = uploadedImages.value.length
-    uploadedImages.value.push({ file, filename: file.name, path: '', previewUrl, uploading: true })
+  async function addFile(file: File) {
+    const blobUrl = URL.createObjectURL(file)
+    const idx = uploadedFiles.value.length
+    uploadedFiles.value.push({
+      file, filename: file.name, path: '', previewUrl: blobUrl,
+      type: 'text', // placeholder, will be updated after upload
+      uploading: true,
+    })
     try {
-      // Ensure we have a session before uploading
       let sid = _currentSid
       if (!sid) {
         const data = await apiPost<{ id: string }>('/api/sessions', {})
         sid = data.id
         _currentSid = sid
       }
-      const result = await uploadImage(file, sid)
-      uploadedImages.value[idx] = {
-        ...uploadedImages.value[idx], path: result.path, uploading: false,
+      const result = await uploadFile(file, sid)
+      URL.revokeObjectURL(blobUrl)
+      uploadedFiles.value[idx] = {
+        ...uploadedFiles.value[idx],
+        path: result.path,
+        previewUrl: result.type === 'image' ? result.url : '',
+        type: result.type as 'image' | 'document' | 'text',
+        uploading: false,
       }
     } catch (err: any) {
-      uploadedImages.value[idx] = {
-        ...uploadedImages.value[idx], uploading: false, error: err.message || 'Upload failed',
+      uploadedFiles.value[idx] = {
+        ...uploadedFiles.value[idx], uploading: false, error: err.message || 'Upload failed',
       }
     }
   }
 
-  function removeImage(index: number) {
-    const entry = uploadedImages.value[index]
+  function removeFile(index: number) {
+    const entry = uploadedFiles.value[index]
     if (entry) URL.revokeObjectURL(entry.previewUrl)
-    uploadedImages.value.splice(index, 1)
+    uploadedFiles.value.splice(index, 1)
   }
 
-  function clearImages() {
+  function clearFiles() {
     const msgUrls = new Set(
       messages.value.filter((m) => m.images).flatMap((m) => m.images!.map((i) => i.previewUrl))
     )
-    for (const entry of uploadedImages.value) {
+    for (const entry of uploadedFiles.value) {
       if (!msgUrls.has(entry.previewUrl)) URL.revokeObjectURL(entry.previewUrl)
     }
-    uploadedImages.value = []
+    uploadedFiles.value = []
   }
 
   function hasUploadsInProgress(): boolean {
-    return uploadedImages.value.some((img) => img.uploading)
+    return uploadedFiles.value.some((f) => f.uploading)
   }
 
   function onSessionDestroyed(sid: string) {
@@ -314,9 +376,10 @@ export function useChat() {
   }
 
   return {
-    messages, isStreaming, pendingPermission, toolCalls, resolvedAgent, uploadedImages,
+    messages, isStreaming, pendingPermission, toolCalls, resolvedAgent, uploadedFiles,
+    deepAnalysis, subProgress,
     toolLabel, toolArgPreview, loadMessages, sendMessage, respondPermission,
-    cancelStreaming, clearMessages, addImage, removeImage, clearImages,
+    cancelStreaming, clearMessages, addFile, removeFile, clearFiles,
     hasUploadsInProgress, switchToSession, claimSession, onSessionDestroyed,
   }
 }

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
-from app.profiles import get_profile
+from app.profiles import Profile
 
 # 数据目录
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -11,37 +11,50 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 # 记忆目录
 MEMORY_GLOBAL_DIR = Path.home() / ".shutong" / "memory"
 
-# 当前 profile
-_current_profile = get_profile()
-
 
 class Settings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     # ===== 运行模式 =====
-    app_profile: str = "dev"  # "dev" | "prod"
+    app_profile: str = "dev"
 
     # ===== 密钥 =====
-    llm_api_key: str = "ollama"  # dev 不需要真实 key，prod 从 .env 覆盖
+    llm_api_key: str = "ollama"
 
-    # ===== LLM（默认值来自 profile）=====
-    llm_model: str = _current_profile.llm_model
-    llm_base_url: str = _current_profile.llm_base_url
-    llm_temperature: float = _current_profile.llm_temperature
-    llm_max_tokens: int = _current_profile.llm_max_tokens
+    # ===== LLM =====
+    llm_model: str = ""
+    llm_base_url: str = ""
+    llm_temperature: float = 0.7
+    llm_max_tokens: int = 4096
 
     # 压缩模型
-    llm_compress_model: str = _current_profile.llm_compress_model
-    llm_compress_temperature: float = _current_profile.llm_compress_temperature
+    llm_compress_model: str = ""
+    llm_compress_temperature: float = 0.1
 
     # ===== Embedding =====
-    # 模型名含 '/' 使用本地 sentence-transformers；不含 '/' 走 API（Ollama 或 DashScope）
-    embedding_model: str = "bge-m3"
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
     embedding_recall_threshold: float = 0.3
 
     # ===== 搜索 =====
-    search_backend: str = _current_profile.search_backend
+    search_backend: str = ""
     bocha_api_key: str = ""
+
+    def _resolve_profile(self) -> Profile:
+        """Pick profile based on app_profile field (which is loaded from .env)."""
+        from app.profiles import PROFILES
+        return PROFILES.get(self.app_profile, PROFILES["dev"])
+
+    def model_post_init(self, __context) -> None:
+        """Fill profile-dependent defaults after .env is loaded."""
+        profile = self._resolve_profile()
+        if not self.llm_model:
+            object.__setattr__(self, "llm_model", profile.llm_model)
+        if not self.llm_base_url:
+            object.__setattr__(self, "llm_base_url", profile.llm_base_url)
+        if not self.llm_compress_model:
+            object.__setattr__(self, "llm_compress_model", self.llm_model or profile.llm_model)
+        if not self.search_backend:
+            object.__setattr__(self, "search_backend", profile.search_backend)
 
     # ===== SQLite =====
     @property
@@ -105,3 +118,16 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def create_llm(temperature: float | None = None, max_tokens: int | None = None) -> "ChatOpenAI":
+    """Shared factory for ChatOpenAI instances with anti-repetition settings."""
+    from langchain_openai import ChatOpenAI as _ChatOpenAI_Create
+
+    return _ChatOpenAI_Create(
+        model=settings.llm_model,
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        temperature=temperature if temperature is not None else settings.llm_temperature,
+        max_tokens=max_tokens if max_tokens is not None else settings.llm_max_tokens,
+    )

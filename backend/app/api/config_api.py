@@ -1,11 +1,13 @@
-"""User configuration API — manage LLM credentials and model selection."""
+"""User configuration API — manage LLM credentials and model selection.
+
+User config only takes effect in prod mode. In dev mode, Ollama defaults are used.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -15,16 +17,17 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 
 CONFIG_PATH = Path(__file__).parent.parent.parent / "data" / "user_config.json"
 
+DEFAULT_DEV_MODEL = "qwen3:8b"
+
 
 class UserConfig(BaseModel):
-    dashscope_api_key: str = Field(default="", description="阿里云 DashScope API Key")
-    text_model: str = Field(default="qwen-plus", description="文本对话模型名称")
-    vision_model: str = Field(default="qwen-vl-plus", description="多模态视觉模型名称")
-    bocha_api_key: str = Field(default="", description="博查搜索 API Key（可选）")
+    dashscope_api_key: str = Field(default="", description="API Key")
+    text_model: str = Field(default="qwen-plus", description="文本模型名称")
+    vision_model: str = Field(default="qwen-vl-plus", description="视觉模型名称")
+    bocha_api_key: str = Field(default="", description="搜索 API Key（可选）")
 
 
 def load_user_config() -> UserConfig:
-    """Load user config from disk, return defaults if missing."""
     if not CONFIG_PATH.exists():
         return UserConfig()
     try:
@@ -36,7 +39,6 @@ def load_user_config() -> UserConfig:
 
 
 def save_user_config(config: UserConfig):
-    """Persist user config to disk."""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(
         config.model_dump_json(indent=2, exclude_none=True),
@@ -45,55 +47,71 @@ def save_user_config(config: UserConfig):
 
 
 def apply_user_config():
-    """Apply saved user config to runtime settings (called on startup)."""
-    config = load_user_config()
-    changed = False
+    """Apply saved user config to runtime settings (startup hook).
 
+    In dev mode: user config is ignored — always use Ollama defaults.
+    In prod mode: user config provides API key and model name.
+    """
     from app.config import settings
 
-    if config.dashscope_api_key:
-        settings.llm_api_key = config.dashscope_api_key
-        changed = True
-    if config.text_model:
-        settings.llm_model = config.text_model
-        changed = True
-    # vision_model is applied per-request when multimodal content is detected
+    profile = settings._resolve_profile()
+
+    if not profile.requires_user_config:
+        # Dev mode — ensure Ollama defaults, ignore user config
+        logger.info("Dev mode active — using Ollama defaults (model=%s)", settings.llm_model)
+        return
+
+    # Prod mode — apply user config
+    config = load_user_config()
+    settings.llm_api_key = config.dashscope_api_key
+    settings.llm_model = config.text_model
     if config.bocha_api_key:
         settings.bocha_api_key = config.bocha_api_key
-        changed = True
 
-    if changed:
-        logger.info(
-            "User config applied: model=%s, dashscope_key=%s, bocha_key=%s",
-            settings.llm_model,
-            "***" if settings.llm_api_key != "ollama" else "ollama",
-            "***" if settings.bocha_api_key else "(not set)",
-        )
+    logger.info(
+        "Prod mode active — user config applied: model=%s, base_url=%s",
+        settings.llm_model,
+        settings.llm_base_url,
+    )
 
 
 @router.get("")
 async def get_config():
     """Return current user config (mask sensitive fields)."""
+    from app.config import settings
+
     config = load_user_config()
+    profile = settings._resolve_profile()
     return {
         "dashscope_api_key": mask_key(config.dashscope_api_key),
         "text_model": config.text_model,
         "vision_model": config.vision_model,
         "bocha_api_key": mask_key(config.bocha_api_key),
+        "app_profile": settings.app_profile,
+        "requires_user_config": profile.requires_user_config,
     }
 
 
 @router.put("")
 async def update_config(config: UserConfig):
     """Save user config and apply to runtime."""
-    # Merge with existing: if a field is empty, keep the old value
+    from app.config import settings
+
     if not config.text_model:
         return {"error": "text_model is required"}
-    if not config.dashscope_api_key or config.dashscope_api_key.startswith("***"):
-        # User didn't change the key — keep existing
+
+    profile = settings._resolve_profile()
+    if not profile.requires_user_config:
+        return {
+            "ok": True,
+            "note": "当前为开发模式，配置已保存但不会生效。切换到 prod 模式后配置生效。",
+        }
+
+    # Merge API key: keep existing if masked or empty
+    if not config.dashscope_api_key or "***" in config.dashscope_api_key:
         existing = load_user_config()
         config.dashscope_api_key = existing.dashscope_api_key
-    if config.bocha_api_key and config.bocha_api_key.startswith("***"):
+    if not config.bocha_api_key or "***" in config.bocha_api_key:
         existing = load_user_config()
         config.bocha_api_key = existing.bocha_api_key
 

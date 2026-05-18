@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import shutil
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.database import async_session_factory
 from app.models.session import Message, Session
+from app.tools.sandbox import get_sandbox_manager
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -40,6 +45,17 @@ class UpdateSessionRequest(BaseModel):
 
 class DeleteRequest(BaseModel):
     cascade: bool = False
+
+
+@router.post("")
+async def create_session() -> dict:
+    """Create a new empty session."""
+    sid = uuid.uuid4().hex
+    async with async_session_factory() as db:
+        session = Session(id=sid, status="active")
+        db.add(session)
+        await db.commit()
+    return {"id": sid, "title": session.title}
 
 
 @router.get("")
@@ -85,7 +101,10 @@ async def get_session(session_id: str) -> SessionDetail:
             title=session.title or "新对话",
             status=session.status or "active",
             messages=[
-                {"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else ""}
+                {"id": m.id, "role": m.role, "content": m.content,
+                 "tool_calls": m.tool_calls,
+                 "images": m.images,
+                 "created_at": m.created_at.isoformat() if m.created_at else ""}
                 for m in messages
             ],
             created_at=session.created_at.isoformat() if session.created_at else "",
@@ -113,11 +132,6 @@ async def update_session(session_id: str, req: UpdateSessionRequest) -> dict:
 @router.delete("/{session_id}")
 async def delete_session(session_id: str) -> dict:
     # Destroy sandbox and workspace before removing DB records
-    import shutil
-    from pathlib import Path
-    from app.config import settings
-    from app.tools.sandbox import get_sandbox_manager
-
     workspace_path = Path(settings.workspaces_base) / session_id
     try:
         get_sandbox_manager().destroy_for_session(workspace_path)

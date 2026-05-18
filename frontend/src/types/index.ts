@@ -11,7 +11,8 @@ export interface Message {
   id: number
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
-  tool_calls?: ToolCall[]
+  tool_calls?: string | null  // JSON-serialized tool call array from DB
+  images?: string | null      // JSON-serialized image info array from DB
   created_at: string
 }
 
@@ -22,7 +23,7 @@ export interface ToolCall {
 }
 
 export interface SSEChunk {
-  type: 'text' | 'thinking' | 'error' | 'done' | 'agent_info'
+  type: 'text' | 'thinking' | 'error' | 'done' | 'agent_info' | 'sub_progress'
   content?: string
   session_id?: string
   agent_type?: string
@@ -34,6 +35,8 @@ export interface ChatRequest {
   session_id: string
   message: string
   agent_type: string  // "auto" | "react" | "plan_execute" | "reflection" | ...
+  images?: string[]
+  deep_analysis?: boolean
 }
 
 export interface AgentInfo {
@@ -42,4 +45,11 @@ export interface AgentInfo {
   description: string
   icon: string
   keywords: string[]
+}
+
+export interface Attachment {
+  path: string
+  filename: string
+  type: 'image' | 'document' | 'text'
+  previewUrl: string
 }

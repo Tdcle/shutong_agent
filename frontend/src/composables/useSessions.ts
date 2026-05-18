@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import type { Session } from '../types'
-import { apiGet, apiPost, apiDelete } from '../api/client'
+import { apiGet, apiPost, apiPut, apiDelete } from '../api/client'
 
 const sessions = ref<Session[]>([])
 const currentSessionId = ref<string>('')
@@ -56,7 +56,7 @@ export function useSessions() {
   }
 
   async function updateSessionTitle(id: string, title: string) {
-    await apiPost(`/api/sessions/${id}`, { title })
+    await apiPut(`/api/sessions/${id}`, { title })
     const session = sessions.value.find((s) => s.id === id)
     if (session) session.title = title
   }

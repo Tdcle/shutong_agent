@@ -17,7 +17,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
-from app.config import settings
+from app.config import settings, create_llm
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +98,7 @@ class PlanExecuteAgent:
 
     @staticmethod
     def _default_llm() -> ChatOpenAI:
-        return ChatOpenAI(
-            model=settings.llm_model,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            temperature=0.3,  # Lower for planning
-            max_tokens=settings.llm_max_tokens,
-        )
+        return create_llm(temperature=0.3)
 
     def _render_messages(self, messages: list[BaseMessage]) -> str:
         parts = []

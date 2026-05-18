@@ -2,6 +2,7 @@
 import { nextTick, ref, watch } from 'vue'
 import { useChat } from '../composables/useChat'
 import PermissionDialog from './PermissionDialog.vue'
+import { marked } from 'marked'
 
 const props = defineProps<{
   sessionId: string
@@ -9,6 +10,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   sessionCreated: [id: string]
+  sessionUpdated: []
 }>()
 
 const {
@@ -17,7 +19,9 @@ const {
   pendingPermission,
   toolCalls,
   resolvedAgent,
-  uploadedImages,
+  uploadedFiles,
+  deepAnalysis,
+  subProgress,
   toolLabel,
   toolArgPreview,
   loadMessages,
@@ -25,8 +29,8 @@ const {
   respondPermission,
   cancelStreaming,
   clearMessages,
-  addImage,
-  removeImage,
+  addFile,
+  removeFile,
   hasUploadsInProgress,
   switchToSession,
   claimSession,
@@ -49,6 +53,15 @@ let lastCreatedSessionId = ''
 
 // Tracks which sessions we've already loaded from DB
 const loadedSessions = new Set<string>()
+
+// After messages render, add copy buttons to code blocks
+watch(
+  () => messages.value.length,
+  async () => {
+    await nextTick()
+    if (chatContainer.value) enhanceCodeBlocks(chatContainer.value)
+  },
+)
 
 watch(
   () => props.sessionId,
@@ -97,6 +110,8 @@ async function handleSend() {
     if (newSessionId && !props.sessionId) {
       onSessionCreated(newSessionId)
     }
+    // Refresh session list in case title was updated
+    emit('sessionUpdated')
   } catch (error) {
     console.error('Chat error:', error)
   }
@@ -144,17 +159,11 @@ function scrollToBottom() {
   }
 }
 
-let codeBlockId = 0
+// Configure marked for safe rendering (no raw HTML from model output)
+marked.setOptions({ breaks: true, gfm: true })
 
 function formatContent(text: string): string {
-  return text
-    .replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang, code) => {
-      const id = `code-block-${++codeBlockId}`
-      const langLabel = lang || 'code'
-      return `<div class="code-block" data-id="${id}"><div class="code-header"><span class="code-lang">${langLabel}</span><button class="code-copy-btn" data-copy-target="${id}">复制</button></div><pre><code id="${id}">${code}</code></pre></div>`
-    })
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\n/g, '<br>')
+  return marked.parse(text) as string
 }
 
 function handleContentClick(event: Event) {
@@ -174,6 +183,23 @@ function handleContentClick(event: Event) {
   }, 1500)
 }
 
+// Enhance code blocks rendered by marked with copy buttons
+function enhanceCodeBlocks(container: HTMLElement) {
+  let codeIdx = 0
+  container.querySelectorAll('pre code').forEach((codeEl) => {
+    const pre = codeEl.parentElement
+    if (!pre || pre.querySelector('.code-header')) return
+    codeIdx++
+    const id = `code-block-${codeIdx}`
+    codeEl.id = id
+    const lang = codeEl.className.replace('language-', '') || 'code'
+    const header = document.createElement('div')
+    header.className = 'code-header'
+    header.innerHTML = `<span class="code-lang">${lang}</span><button class="code-copy-btn" data-copy-target="${id}">复制</button>`
+    pre.insertBefore(header, codeEl)
+  })
+}
+
 function handleUploadClick() {
   fileInput.value?.click()
 }
@@ -188,14 +214,14 @@ function handleFileChange(event: Event) {
   input.value = ''
 }
 
-const imageExts = /\.(png|jpg|jpeg|gif|bmp|webp|tiff|ico)$/i
+const supportedExts = /\.(png|jpg|jpeg|gif|bmp|webp|tiff|ico|pdf|docx|xlsx|xls|pptx|txt|md|csv|json|xml|yaml|yml|toml|ini|cfg|log|html|css|py|js|ts|java|go|rs|c|cpp|sh|bat|sql|vue|jsx|tsx|svg)$/i
 
 function handleFile(file: File) {
-  if (!imageExts.test(file.name)) {
+  if (!supportedExts.test(file.name)) {
     console.warn('Unsupported file type:', file.name)
     return
   }
-  addImage(file)
+  addFile(file)
 }
 
 function handlePaste(event: ClipboardEvent) {
@@ -233,12 +259,22 @@ function handlePaste(event: ClipboardEvent) {
           </div>
           <div v-if="msg.images && msg.images.length > 0" class="message-images">
             <div
-              v-for="(img, i) in msg.images"
-              :key="'msg_img_' + i"
-              class="message-image-thumb"
-              @click="handlePreviewImage(img.previewUrl, img.filename)"
+              v-for="(att, i) in msg.images"
+              :key="'msg_att_' + i"
+              class="message-attachment"
+              :class="{ 'is-image': att.type === 'image' }"
             >
-              <img :src="img.previewUrl" :alt="img.filename" />
+              <img
+                v-if="att.type === 'image' && att.previewUrl"
+                :src="att.previewUrl"
+                :alt="att.filename"
+                class="message-image-thumb"
+                @click="handlePreviewImage(att.previewUrl, att.filename)"
+              />
+              <div v-else class="message-doc-badge">
+                <span class="doc-ext-badge">{{ att.filename.split('.').pop()?.toUpperCase() }}</span>
+                <span class="doc-name">{{ att.filename }}</span>
+              </div>
             </div>
           </div>
           <div
@@ -248,6 +284,9 @@ function handlePaste(event: ClipboardEvent) {
           ></div>
           <div v-if="msg.isStreaming" class="typing-indicator">
             <span></span><span></span><span></span>
+          </div>
+          <div v-if="subProgress.length > 0" class="sub-progress-box">
+            <div v-for="(p, i) in subProgress" :key="'prog_' + i" class="sub-progress-line">{{ p }}</div>
           </div>
           <!-- Tool calls for this message -->
           <div v-if="msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.some((tc) => tc.visible)" class="tool-steps-section">
@@ -283,26 +322,41 @@ function handlePaste(event: ClipboardEvent) {
       </template>
     </div>
 
-    <div v-if="uploadedImages.length > 0" class="upload-bar">
+    <div v-if="uploadedFiles.length > 0" class="upload-bar">
       <div
-        v-for="(img, idx) in uploadedImages"
-        :key="'img_' + idx"
-        class="upload-thumb"
-        :class="{ 'is-uploading': img.uploading, 'has-error': img.error }"
-        :title="img.error || img.filename"
-        @click="!img.uploading && !img.error && handlePreviewImage(img.previewUrl, img.filename)"
+        v-for="(file, idx) in uploadedFiles"
+        :key="'file_' + idx"
+        class="upload-item"
+        :class="{ 'is-uploading': file.uploading, 'has-error': file.error }"
+        :title="file.error || file.filename"
       >
-        <img :src="img.previewUrl" :alt="img.filename" />
-        <div v-if="img.uploading" class="upload-overlay">
+        <!-- Image: show thumbnail -->
+        <img
+          v-if="file.type === 'image' && file.previewUrl"
+          :src="file.previewUrl"
+          :alt="file.filename"
+          class="upload-thumb-img"
+          @click="handlePreviewImage(file.previewUrl, file.filename)"
+        />
+        <!-- Document: show file type icon -->
+        <div
+          v-else
+          class="upload-file-icon"
+          @click="file.previewUrl && handlePreviewImage(file.previewUrl, file.filename)"
+        >
+          <span class="file-ext">{{ file.filename.split('.').pop()?.toUpperCase() || 'FILE' }}</span>
+        </div>
+        <div class="upload-filename">{{ file.filename.length > 12 ? file.filename.slice(0,10) + '...' : file.filename }}</div>
+        <div v-if="file.uploading" class="upload-overlay">
           <span class="upload-spinner"></span>
         </div>
         <button
-          v-if="!img.uploading"
+          v-if="!file.uploading"
           class="upload-remove"
-          @click.stop="removeImage(idx)"
+          @click.stop="removeFile(idx)"
           title="移除"
         >&times;</button>
-        <div v-if="img.error" class="upload-error-flag" title="上传失败">!</div>
+        <div v-if="file.error" class="upload-error-flag" title="上传失败">!</div>
       </div>
     </div>
 
@@ -337,21 +391,23 @@ function handlePaste(event: ClipboardEvent) {
     <input
       ref="fileInput"
       type="file"
-      accept="image/*"
+      accept=".png,.jpg,.jpeg,.gif,.bmp,.webp,.tiff,.ico,.pdf,.docx,.xlsx,.xls,.pptx,.txt,.md,.csv,.json,.xml,.yaml,.yml,.toml,.ini,.cfg,.log,.html,.css,.py,.js,.ts,.java,.go,.rs,.c,.cpp,.sh,.bat,.sql,.vue,.jsx,.tsx,.svg"
       multiple
       style="display: none"
       @change="handleFileChange"
     />
 
     <div class="toolbar">
-      <button class="toolbar-btn" @click="handleUploadClick" title="上传图片">
+      <button class="toolbar-btn" @click="handleUploadClick" title="上传文件">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-          <circle cx="8.5" cy="8.5" r="1.5"/>
-          <polyline points="21 15 16 10 5 21"/>
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
         </svg>
-        <span>图片</span>
+        <span>文件</span>
       </button>
+      <label class="deep-analysis-toggle" title="启用后将对上传的文件或主题进行深度分析（含搜索和多轮反思）">
+        <input v-model="deepAnalysis" type="checkbox" />
+        <span>深度分析</span>
+      </label>
     </div>
 
     <!-- Image preview modal -->
@@ -541,6 +597,22 @@ function handlePaste(event: ClipboardEvent) {
   color: inherit;
   padding: 0;
 }
+
+/* Markdown styling */
+.message-content :deep(h1) { font-size: 1.4em; font-weight: 700; margin: 0.6em 0 0.3em; }
+.message-content :deep(h2) { font-size: 1.2em; font-weight: 600; margin: 0.5em 0 0.25em; }
+.message-content :deep(h3) { font-size: 1.05em; font-weight: 600; margin: 0.4em 0 0.2em; }
+.message-content :deep(ul), .message-content :deep(ol) { padding-left: 1.5em; margin: 0.3em 0; }
+.message-content :deep(li) { margin: 0.15em 0; }
+.message-content :deep(table) { border-collapse: collapse; margin: 0.5em 0; font-size: 0.9em; }
+.message-content :deep(th), .message-content :deep(td) { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.message-content :deep(th) { background: #f1f5f9; font-weight: 600; }
+.message-content :deep(blockquote) { border-left: 3px solid var(--primary); padding-left: 12px; margin: 0.4em 0; color: var(--text-secondary); }
+.message-content :deep(a) { color: var(--primary); text-decoration: underline; }
+.message-content :deep(hr) { border: none; border-top: 1px solid var(--border); margin: 0.8em 0; }
+.message-content :deep(p) { margin: 0.3em 0; }
+.message-content :deep(strong) { font-weight: 600; }
+.message-content :deep(em) { font-style: italic; }
 
 .typing-indicator {
   display: flex;
@@ -794,6 +866,57 @@ function handlePaste(event: ClipboardEvent) {
   background: rgba(99, 102, 241, 0.04);
 }
 
+.deep-analysis-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  user-select: none;
+}
+
+.deep-analysis-toggle:hover {
+  border-color: #8b5cf6;
+  color: #7c3aed;
+}
+
+.deep-analysis-toggle input[type='checkbox'] {
+  accent-color: #7c3aed;
+  width: 14px;
+  height: 14px;
+}
+
+.deep-analysis-toggle:has(input:checked) {
+  border-color: #8b5cf6;
+  color: #7c3aed;
+  background: rgba(139, 92, 246, 0.06);
+}
+
+.sub-progress-box {
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  border-radius: var(--radius-sm);
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.sub-progress-line {
+  font-size: 11px;
+  color: #7c3aed;
+  line-height: 1.6;
+}
+
+.sub-progress-line::before {
+  content: '⏳ ';
+}
+
 .upload-bar {
   display: flex;
   gap: 8px;
@@ -801,34 +924,68 @@ function handlePaste(event: ClipboardEvent) {
   flex-wrap: wrap;
 }
 
-.upload-thumb {
+.upload-item {
   position: relative;
-  width: 56px;
-  height: 56px;
+  width: 64px;
   border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  background: var(--bg-card);
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
   flex-shrink: 0;
   cursor: pointer;
   transition: border-color 0.15s;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: hidden;
 }
 
-.upload-thumb:hover {
-  border-color: var(--primary);
+.upload-item:hover {
+  border-color: #6366f1;
 }
 
-.upload-thumb img {
-  width: 100%;
-  height: 100%;
+.upload-thumb-img {
+  width: 64px;
+  height: 48px;
   object-fit: cover;
 }
 
-.upload-thumb.is-uploading img {
+.upload-file-icon {
+  width: 64px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f1f5f9;
+}
+
+.file-ext {
+  font-size: 11px;
+  font-weight: 700;
+  color: #1e293b;
+  padding: 2px 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #e2e8f0;
+}
+
+.upload-filename {
+  font-size: 10px;
+  font-weight: 600;
+  color: #0f172a;
+  padding: 4px 4px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60px;
+}
+
+.upload-item.is-uploading .upload-thumb-img,
+.upload-item.is-uploading .upload-file-icon {
   opacity: 0.5;
 }
 
-.upload-thumb.has-error {
+.upload-item.has-error {
   border-color: var(--danger);
 }
 
@@ -897,6 +1054,10 @@ function handlePaste(event: ClipboardEvent) {
   margin-bottom: 8px;
 }
 
+.message-attachment {
+  flex-shrink: 0;
+}
+
 .message-image-thumb {
   width: 80px;
   height: 80px;
@@ -905,7 +1066,7 @@ function handlePaste(event: ClipboardEvent) {
   border: 1px solid var(--border);
   cursor: pointer;
   transition: transform 0.15s, border-color 0.15s;
-  flex-shrink: 0;
+  object-fit: cover;
 }
 
 .message-image-thumb:hover {
@@ -913,18 +1074,45 @@ function handlePaste(event: ClipboardEvent) {
   transform: scale(1.05);
 }
 
-.message-image-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+.message-doc-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
-.message.user .message-image-thumb {
-  border-color: rgba(255, 255, 255, 0.2);
+.doc-ext-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #1e293b;
+  background: #e2e8f0;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #cbd5e1;
 }
 
-.message.user .message-image-thumb:hover {
-  border-color: rgba(255, 255, 255, 0.6);
+.doc-name {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.message.user .message-doc-badge {
+  background: rgba(255,255,255,0.15);
+  border-color: rgba(255,255,255,0.3);
+}
+
+.message.user .doc-ext-badge {
+  color: #1e293b;
+  background: #e2e8f0;
+  border-color: #cbd5e1;
+}
+
+.message.user .doc-name {
+  color: #1e293b;
 }
 
 /* Image preview modal */

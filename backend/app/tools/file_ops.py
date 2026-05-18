@@ -871,7 +871,11 @@ def delete_file(path: str) -> str:
             else:
                 sandbox_path.unlink()
         sync_result = sandbox.sync_back(state)
-        deleted_label = "Deleted external path" if not host_path.is_relative_to(get_session_workspace() or host_path) else "Deleted path"
+        ws = get_session_workspace()
+        if ws and not host_path.is_relative_to(ws):
+            deleted_label = "Deleted external path"
+        else:
+            deleted_label = "Deleted path"
         return f"{deleted_label}: {path}\n{sync_result.to_summary()}"
     except Exception as exc:
         return f"Delete failed: {exc}"

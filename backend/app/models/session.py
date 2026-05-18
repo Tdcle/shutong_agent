@@ -39,6 +39,7 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
     tool_calls: Mapped[Optional[str]] = mapped_column(Text)
+    images: Mapped[Optional[str]] = mapped_column(Text)  # JSON array of uploaded image paths
     token_count: Mapped[Optional[int]] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

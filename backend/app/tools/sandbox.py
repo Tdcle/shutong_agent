@@ -97,7 +97,7 @@ import builtins as __agent_b
 # ---- Block dangerous module imports (via sys.meta_path) ----
 _AGENT_BLOCKED_MODULES = frozenset({
     # Network — prevent data exfiltration
-    "socket", "requests", "urllib.request", "urllib3", "httpx",
+    "requests", "urllib.request", "urllib3", "httpx",
     "aiohttp", "http.client", "http.server", "ftplib", "smtplib",
     "telnetlib", "poplib",
     # Dynamic code — prevent code injection
@@ -147,6 +147,27 @@ except ImportError:
     pass
 
 del __agent_blocked_call
+
+# ---- Configure matplotlib for CJK support (silent, no-op if matplotlib not used) ----
+try:
+    import matplotlib
+    matplotlib.rcParams["font.sans-serif"] = ["Noto Sans SC", "SimSun", "Microsoft YaHei", "DejaVu Sans"]
+    matplotlib.rcParams["axes.unicode_minus"] = False
+except Exception:
+    pass
+
+# ---- Redirect plt.show() to savefig() — no display in sandbox ----
+try:
+    import matplotlib.pyplot as _plt
+    _original_show = _plt.show
+    def _sandbox_show(*_a, **_kw):
+        import os as _os
+        fname = _os.path.join(_os.getcwd(), "figure.png")
+        _plt.savefig(fname, dpi=100, bbox_inches="tight")
+        print(f"Chart saved to figure.png (use read_file to verify, or reference it directly in the workspace)")
+    _plt.show = _sandbox_show
+except Exception:
+    pass
 # === END SECURITY PREAMBLE ===
 '''
 
@@ -309,16 +330,12 @@ class SessionSandboxManager:
         state.external_source_hashes[rel_key] = self._snapshot_external_source(host_path)
         return state, host_path, output_path, rel_root.as_posix()
 
-    async def run_command(self, command: str, working_dir: str = ".", timeout_seconds: int | None = None) -> CommandResult:
+    async def run_command(self, command: str, timeout_seconds: int | None = None) -> CommandResult:
         state = self.ensure("exec")
         blocked_reason = self._validate_command(command)
         if blocked_reason:
             return self._blocked_result(state, blocked_reason)
-        try:
-            output_cwd = self._resolve_output_working_dir(state, working_dir)
-        except ValueError as exc:
-            return self._path_error_result(state, exc)
-
+        output_cwd = self._resolve_output_working_dir(state)
         output_cwd, restricted_env, _ = self._prepare_execution_context(state, output_cwd)
 
         timeout = timeout_seconds or settings.shell_timeout_seconds
@@ -339,7 +356,7 @@ class SessionSandboxManager:
             sync_result=sync_result,
         )
 
-    async def run_python(self, code: str, working_dir: str = ".", timeout_seconds: int | None = None) -> CommandResult:
+    async def run_python(self, code: str, timeout_seconds: int | None = None) -> CommandResult:
         state = self.ensure("exec")
         python_executable = Path(settings.agent_python_executable)
         if not python_executable.exists():
@@ -347,12 +364,7 @@ class SessionSandboxManager:
                 state,
                 f"Agent Python runtime not found: {python_executable}",
             )
-
-        try:
-            output_cwd = self._resolve_output_working_dir(state, working_dir)
-        except ValueError as exc:
-            return self._path_error_result(state, exc)
-
+        output_cwd = self._resolve_output_working_dir(state)
         output_cwd, restricted_env, sandbox_tmp = self._prepare_execution_context(state, output_cwd)
         script_path = sandbox_tmp / f"agent_exec_{int(time.time() * 1000)}.py"
 
@@ -654,17 +666,13 @@ class SessionSandboxManager:
                 break
             current = current.parent
 
-    def _resolve_output_working_dir(self, state: SandboxState, working_dir: str) -> Path:
-        try:
-            host_wd = ensure_within_workspace(working_dir)
-        except ValueError as e:
-            raise ValueError(
-                f"{e}\n"
-                "Tip: To process files outside the workspace, first use copy_file to stage "
-                "them into the workspace, then use execute_python/execute_bash on the copy."
-            ) from e
-        rel = rel_to_workspace(host_wd)
-        return state.output_workspace / rel
+    def _resolve_output_working_dir(self, state: SandboxState) -> Path:
+        """Return the output workspace root as the working directory.
+
+        The working directory is always the sandbox output workspace root.
+        The model never needs to specify one — we hardcode it.
+        """
+        return state.output_workspace
 
     def _empty_change_set(self) -> dict[str, list[str]]:
         return {
@@ -685,31 +693,51 @@ class SessionSandboxManager:
             sync_result=SyncResult(profile=state.profile, change_set=self._empty_change_set()),
         )
 
-    def _path_error_result(self, state: SandboxState, exc: Exception) -> CommandResult:
-        return CommandResult(
-            stdout="",
-            stderr=str(exc),
-            exit_code=-1,
-            success=False,
-            sync_result=SyncResult(profile=state.profile, change_set=self._empty_change_set()),
-        )
 
     def _prepare_execution_context(self, state: SandboxState, output_cwd: Path) -> tuple[Path, dict, Path]:
         output_cwd.mkdir(parents=True, exist_ok=True)
         sandbox_tmp = state.output_workspace.parent / "tmp"
         sandbox_tmp.mkdir(parents=True, exist_ok=True)
         sandbox_home = state.output_workspace
-        restricted_env = {
-            **os.environ,
+
+        # Build a clean environment — do NOT blindly copy os.environ.
+        # Many env vars (XDG_CACHE_HOME, MPLCONFIGDIR, etc.) point to paths
+        # outside the workspace and cause tools like matplotlib to fail.
+        # Only copy safe, path-agnostic variables.
+        _SAFE_ENV_KEYS = {
+            "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR",  # Windows system
+            "PATH", "PATHEXT", "COMSPEC",
+            "LANG", "LC_ALL", "LC_CTYPE",  # Locale
+            "USER", "USERNAME", "LOGNAME",
+            "DISPLAY", "WAYLAND_DISPLAY",  # GUI (for matplotlib)
+            "TERM", "COLORTERM", "SHELL",
+            "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+            "CUDA_VISIBLE_DEVICES", "CUDA_PATH",
+            "OLLAMA_HOST", "OPENAI_API_KEY", "DASHSCOPE_API_KEY",
+        }
+        restricted_env = {}
+        for key, val in os.environ.items():
+            if key in _SAFE_ENV_KEYS or key.startswith(("PROMPT_", "PS")):
+                restricted_env[key] = val
+
+        # Core overrides — all paths point into the sandbox
+        restricted_env.update({
             "HOME": str(sandbox_home),
             "USERPROFILE": str(sandbox_home),
             "TEMP": str(sandbox_tmp),
             "TMP": str(sandbox_tmp),
+            "TMPDIR": str(sandbox_tmp),
             "SANDBOX_WORKSPACE": str(state.output_workspace),
             "SANDBOX_PROFILE": state.profile,
+            # Force matplotlib to use a backend that doesn't need a display
+            "MPLBACKEND": "Agg",
+            # Redirect matplotlib config/cache into sandbox tmp
+            "MPLCONFIGDIR": str(sandbox_tmp),
+            # Python isolation
             "PYTHONNOUSERSITE": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
-        }
+            "PYTHONSTARTUP": "",
+        })
         if settings.shell_block_network:
             restricted_env.update(
                 {

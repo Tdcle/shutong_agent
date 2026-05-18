@@ -38,6 +38,7 @@ class ReflectionAgent:
         system_prompt: str = "",
         max_reflection_rounds: int = 2,
         max_react_rounds: int = 10,
+        context_char_limit: int | None = None,
     ):
         self.llm = llm or self._default_llm()
         self.system_prompt = system_prompt
@@ -47,18 +48,13 @@ class ReflectionAgent:
             llm=self.llm,
             system_prompt=system_prompt,
             max_rounds=max_react_rounds,
+            context_char_limit=context_char_limit or settings.context_char_limit,
         )
 
     @staticmethod
     def _default_llm() -> ChatOpenAI:
-        from app.config import settings
-        return ChatOpenAI(
-            model=settings.llm_model,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            temperature=settings.llm_temperature,
-            max_tokens=settings.llm_max_tokens,
-        )
+        from app.config import create_llm
+        return create_llm()
 
     async def call(self, question: str, history: list | None = None) -> str:
         answer = await self.react_agent.call(question, history)

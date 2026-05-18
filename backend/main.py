@@ -8,12 +8,31 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
-import threading
-import webbrowser
+from pathlib import Path
+
+# Load env file for libraries that read directly from os.environ
+_env_path = Path(__file__).parent / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _key, _, _val = _line.partition("=")
+            _key, _val = _key.strip(), _val.strip()
+            if _key and _key not in os.environ:
+                os.environ[_key] = _val
+
+# Prevent httpx from routing localhost through system proxy (Windows)
+if os.name == "nt":
+    no_proxy = os.environ.get("NO_PROXY", "")
+    for host in ("localhost", "127.0.0.1"):
+        if host not in no_proxy.split(","):
+            no_proxy = f"{no_proxy},{host}" if no_proxy else host
+    os.environ["NO_PROXY"] = no_proxy
+    os.environ["no_proxy"] = no_proxy
 
 import uvicorn
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +45,7 @@ from app.api.session import router as session_router
 from app.api.memory_api import router as memory_router
 from app.api.config_api import router as config_router, apply_user_config
 from app.api.skills_api import router as skills_router
+from app.api.agents_api import router as agents_router
 from app.models.database import init_db
 from app.config import settings
 from app.tools.sandbox import get_sandbox_manager
@@ -92,6 +112,7 @@ app.include_router(session_router)
 app.include_router(memory_router)
 app.include_router(skills_router)
 app.include_router(config_router)
+app.include_router(agents_router)
 
 
 @app.get("/api/health")
@@ -113,17 +134,10 @@ if FRONTEND_DIST.exists() and (FRONTEND_DIST / "index.html").exists():
         return FileResponse(FRONTEND_DIST / "index.html")
 
 
-def open_browser():
-    webbrowser.open("http://127.0.0.1:8000")
-
-
 def main():
     if "--cli" in sys.argv:
         asyncio.run(run_cli())
     else:
-        # Auto-open browser after 1 second
-        if "--no-browser" not in sys.argv:
-            threading.Timer(1.0, open_browser).start()
         uvicorn.run(
             "main:app",
             host="127.0.0.1",
@@ -169,7 +183,7 @@ async def run_cli():
                 # Clean up old workspace and create new one
                 get_sandbox_manager().destroy_for_session(workspace_path)
                 shutil.rmtree(workspace_path, ignore_errors=True)
-                session_id = f"cli_session_{asyncio.get_event_loop().time()}"
+                session_id = f"cli_session_{asyncio.get_running_loop().time()}"
                 workspace_path = create_session_workspace(session_id)
                 set_session_workspace(workspace_path)
                 print(f"[Session cleared, new workspace: {workspace_path}]")

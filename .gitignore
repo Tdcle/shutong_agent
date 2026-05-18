@@ -22,6 +22,7 @@ venv/
 # Local / agent
 .claude/
 *.local.json
+CLAUDE.md
 
 # Node / Frontend
 node_modules/

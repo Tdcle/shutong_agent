@@ -113,13 +113,8 @@ class HITLAgent:
 
     @staticmethod
     def _default_llm() -> ChatOpenAI:
-        return ChatOpenAI(
-            model=settings.llm_model,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            temperature=settings.llm_temperature,
-            max_tokens=settings.llm_max_tokens,
-        )
+        from app.config import create_llm
+        return create_llm()
 
     async def call(self, question: str) -> AgentFinished | AgentInterrupted:
         messages: list[BaseMessage] = [

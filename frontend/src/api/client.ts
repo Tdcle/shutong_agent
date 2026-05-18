@@ -50,6 +50,8 @@ export interface SSEData {
   success?: boolean
   warning?: boolean
   result?: string
+  // sub_progress
+  message?: string
 }
 
 export function streamChat(
@@ -57,6 +59,7 @@ export function streamChat(
   message: string,
   agentType: string = 'auto',
   images: string[] = [],
+  deepAnalysis: boolean = false,
   onChunk: (data: SSEData) => void,
   onError: (err: Error) => void,
   onDone: () => void
@@ -66,7 +69,7 @@ export function streamChat(
   fetch(`${BASE_URL}/api/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, message, agent_type: agentType, images }),
+    body: JSON.stringify({ session_id: sessionId, message, agent_type: agentType, images, deep_analysis: deepAnalysis }),
     signal: controller.signal,
   })
     .then(async (res) => {
@@ -76,10 +79,14 @@ export function streamChat(
 
       const decoder = new TextDecoder()
       let buffer = ''
+      let finished = false
 
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
+        if (done) {
+          if (!finished) onDone()
+          break
+        }
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
@@ -90,7 +97,10 @@ export function streamChat(
             try {
               const data = JSON.parse(line.slice(6))
               onChunk(data)
-              if (data.type === 'done') onDone()
+              if (data.type === 'done' && !finished) {
+                finished = true
+                onDone()
+              }
             } catch {
               // Skip parse errors for partial chunks
             }
@@ -105,10 +115,10 @@ export function streamChat(
   return controller
 }
 
-export async function uploadImage(
+export async function uploadFile(
   file: File,
   sessionId: string
-): Promise<{ filename: string; path: string; session_id: string }> {
+): Promise<{ filename: string; path: string; url: string; type: string; session_id: string }> {
   const formData = new FormData()
   formData.append('file', file)
   formData.append('session_id', sessionId)

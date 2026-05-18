@@ -78,9 +78,13 @@ class AgentService:
             read_file,
             write_file,
         )
-        from app.tools.image_ops import analyze_image
+        from app.tools.image_ops import analyze_image as analyze_image_fn
         from app.tools.search import search_web
         from app.tools.shell import execute_python, execute_bash
+        from app.tools.document_ops import read_document
+        from app.tools.deep_analysis_tool import start_deep_analysis
+        from app.tools.code_agent_tool import start_code_agent
+        from app.tools.search_agent_tool import start_search_agent
 
         self.tool_registry = ToolRegistry()
 
@@ -108,10 +112,14 @@ class AgentService:
         ]:
             register(fn)
 
-        register(analyze_image)
+        register(analyze_image_fn)
         register(search_web)
         register(execute_bash)
         register(execute_python)
+        register(read_document)
+        register(start_deep_analysis)
+        register(start_code_agent)
+        register(start_search_agent)
 
         skill_tool = self.skill_registry.create_read_skill_tool()
         self.tool_registry.register(
@@ -128,7 +136,8 @@ class AgentService:
     def _db_messages_to_lc(self, db_messages: list) -> list[BaseMessage]:
         """Convert DB Message objects to LangChain messages."""
         lc_messages: list[BaseMessage] = []
-        for message in db_messages[-30:]:
+        limit = settings.short_term_max_messages
+        for message in db_messages[-limit:]:
             if message.role == "user":
                 lc_messages.append(HumanMessage(content=message.content))
             elif message.role == "assistant":
@@ -146,18 +155,14 @@ class AgentService:
         hostname = socket.gethostname()
 
         env_lines = [
-            "## 运行环境",
-            f"- 操作系统：{platform.system()} {platform.release()}",
-            f"- 主机名：{hostname}",
-            f"- 用户主目录：{home}",
-            f"- 桌面目录：{desktop}",
+            '## Running Environment (IMPORTANT - these paths are real, follow them strictly)',
+            '- OS: **' + platform.system() + ' ' + platform.release() + '** (NOT Linux - do NOT use /root, /home etc.)',
+            '- Hostname: ' + hostname,
+            '- Home: ' + home,
+            '- Desktop: ' + desktop,
         ]
         if workspace_path:
-            env_lines.append(f"- 当前会话工作区：{workspace_path}")
-        env_lines.append("")
-        env_lines.append(
-            "如果用户提到“桌面”“主目录”或“当前工作区”，请以上面的绝对路径为准，并在需要时显式引用。"
-        )
+            env_lines.append('- **Workspace (default working dir): ' + workspace_path + '**')
         parts.append("\n".join(env_lines))
 
         skills_prompt = self.skill_registry.get_skills_prompt()

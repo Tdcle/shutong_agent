@@ -47,33 +47,6 @@ class ToolRegistry:
     def get_all(self) -> list[ToolDef]:
         return list(self._tools.values())
 
-    def to_openai_tools(self) -> list[dict]:
-        """Convert tools to OpenAI function definitions."""
-        tools: list[dict] = []
-        for tool_def in self._tools.values():
-            params = dict(tool_def.parameters) if tool_def.parameters else {"type": "object", "properties": {}}
-            props = dict(params.get("properties", {}))
-            required = list(params.get("required", []))
-            props["purpose"] = {
-                "type": "string",
-                "description": "请简要说明为什么调用这个工具，以及希望通过它完成什么。",
-            }
-            if "purpose" not in required:
-                required.append("purpose")
-            params["properties"] = props
-            params["required"] = required
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_def.name,
-                        "description": tool_def.description,
-                        "parameters": params,
-                    },
-                }
-            )
-        return tools
-
 
 def tool(
     name: str,

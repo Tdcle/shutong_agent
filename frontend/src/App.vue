@@ -45,6 +45,7 @@ onMounted(() => {
       <ChatArea
         :session-id="currentSessionId"
         @session-created="(id: string) => { setCurrentId(id); loadSessions() }"
+        @session-updated="loadSessions"
       />
     </main>
     <UserSettings />

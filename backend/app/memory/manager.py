@@ -11,7 +11,7 @@ from typing import Optional
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from app.config import settings
+from app.config import settings, create_llm
 from app.memory.short_term import ShortTermMemory
 from app.memory.store import FileMemoryStore
 from app.memory.types import MemoryEntry, MemoryType
@@ -30,21 +30,11 @@ class MemoryManager:
 
     @staticmethod
     def _default_llm() -> ChatOpenAI:
-        return ChatOpenAI(
-            model=settings.llm_model, api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url, temperature=0.3,
-            max_tokens=settings.llm_max_tokens,
-        )
+        return create_llm(temperature=0.3)
 
     @staticmethod
     def _default_compress_llm() -> ChatOpenAI:
-        """Lightweight model for summarization — same endpoint, cheaper model."""
-        return ChatOpenAI(
-            model=settings.llm_compress_model, api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            temperature=settings.llm_compress_temperature,
-            max_tokens=1024,
-        )
+        return create_llm(temperature=settings.llm_compress_temperature, max_tokens=1024)
 
     # ===== L0 Working Memory =====
 
@@ -193,9 +183,8 @@ class MemoryManager:
         if should_extract:
             await self._extract_memories(user_msg, assistant_msg)
 
-    async def _extract_memories(self, _label: str, dialogue: str):
+    async def _extract_memories(self, user_msg: str, assistant_msg: str):
         """LLM extracts memories and decides whether to merge or create new ones."""
-        # Build list of existing memories so LLM can decide
         existing_list = self._build_existing_list()
         existing_hint = ""
         if existing_list:
@@ -203,6 +192,8 @@ class MemoryManager:
 {existing_list}
 
 """
+
+        dialogue = f"用户: {user_msg}\n\n助手: {assistant_msg}"
 
         prompt = f"""{existing_hint}分析以下对话，提取值得长期记忆的信息。返回 JSON 数组，每条包含：
 - name: 英文kebab-case标识。若信息与已有记忆属于**同一主题**，请复用已有名称（后续会自动合并到该文件）
@@ -221,8 +212,8 @@ reference: 外部链接、API
 
         try:
             resp = await self.llm.ainvoke([
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": dialogue},
+                SystemMessage(content=prompt),
+                HumanMessage(content=dialogue),
             ])
             text = str(resp.content).strip()
             match = re.search(r"\[.*\]", text, re.DOTALL)
